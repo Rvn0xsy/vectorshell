@@ -1,4 +1,5 @@
 use crate::client_manager::{ClientManager, ClientMetadata, ExecHistoryEntry};
+use crate::db::Db;
 use crate::ui::{ui_print, UiState};
 use crate::config::ServerConfig;
 use futures_util::{SinkExt, StreamExt};
@@ -18,6 +19,7 @@ use std::io::BufReader;
 pub async fn run_websocket_server(
     config: ServerConfig,
     manager: Arc<Mutex<ClientManager>>,
+    db: Arc<Mutex<Db>>,
     ui_state: Arc<Mutex<UiState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(&config.server.listen).await?;
@@ -37,11 +39,12 @@ pub async fn run_websocket_server(
         let (stream, _) = listener.accept().await?;
         let config = config.clone();
         let manager = Arc::clone(&manager);
+        let db = Arc::clone(&db);
         let ui_state = Arc::clone(&ui_state);
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, config, manager, ui_state, tls_acceptor).await {
+            if let Err(error) = handle_connection(stream, config, manager, db, ui_state, tls_acceptor).await {
                 tracing::error!("connection failed: {}", error);
             }
         });
@@ -53,6 +56,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     config: ServerConfig,
     manager: Arc<Mutex<ClientManager>>,
+    db: Arc<Mutex<Db>>,
     ui_state: Arc<Mutex<UiState>>,
     tls_acceptor: Option<TlsAcceptor>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -65,7 +69,7 @@ async fn handle_connection(
             Ok(resp)
         })
         .await?;
-        handle_ws_stream(ws_stream, config, manager, ui_state).await?;
+        handle_ws_stream(ws_stream, config, manager, db, ui_state).await?;
     } else {
         let ws_stream = accept_hdr_async(stream, |req: &Request, resp: Response| {
             if req.uri().path() != config.server.ws_path {
@@ -74,7 +78,7 @@ async fn handle_connection(
             Ok(resp)
         })
         .await?;
-        handle_ws_stream(ws_stream, config, manager, ui_state).await?;
+        handle_ws_stream(ws_stream, config, manager, db, ui_state).await?;
     }
     Ok(())
 }
@@ -83,6 +87,7 @@ async fn handle_ws_stream<S>(
     ws_stream: tokio_tungstenite::WebSocketStream<S>,
     config: ServerConfig,
     manager: Arc<Mutex<ClientManager>>,
+    db: Arc<Mutex<Db>>,
     ui_state: Arc<Mutex<UiState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -90,6 +95,8 @@ where
 {
     let (mut write, mut read) = ws_stream.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerToClientMessage>();
+
+    let mut active_connection_id: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -131,14 +138,30 @@ where
                             tracing::info!(client_id = %payload.client_id, "client registered");
                             let metadata = ClientMetadata::new(
                                 payload.client_id.clone(),
+                                payload.connection_id.clone(),
+                                payload.install_id,
+                                payload.build_uuid,
                                 payload.hostname,
+                                payload.username,
+                                payload.pid,
                                 payload.os,
                                 payload.arch,
                                 payload.ip,
                                 payload.timestamp,
+                                payload.capabilities,
                             );
                             if let Ok(mut mgr) = manager.lock() {
                                 mgr.register(payload.client_id, tx.clone(), metadata);
+                            }
+                            active_connection_id = Some(payload.connection_id);
+                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
+                                active_connection_id.clone(),
+                                manager.lock(),
+                                db.lock(),
+                            ) {
+                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
+                                    let _ = db.upsert_session_online(&meta, unix_timestamp());
+                                }
                             }
                         }
                         ClientToServerMessage::Heartbeat { id: _, payload } => {
@@ -146,8 +169,24 @@ where
                             if let Ok(mut mgr) = manager.lock() {
                                 mgr.update_heartbeat(&payload.client_id, payload.timestamp);
                             }
+                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
+                                active_connection_id.clone(),
+                                manager.lock(),
+                                db.lock(),
+                            ) {
+                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
+                                    let _ = db.upsert_session_online(&meta, unix_timestamp());
+                                }
+                            }
                         }
                         ClientToServerMessage::Result { id, payload } => {
+                            let command_clone = payload.command.clone();
+                            let stdout_clone = payload.stdout.clone();
+                            let stderr_clone = payload.stderr.clone();
+                            let cwd_clone = payload.cwd.clone();
+                            let env_clone = payload.env.clone();
+                            let duration_clone = payload.duration_ms;
+
                             tracing::info!(
                                 "result {}: exit_code={} duration_ms={} cwd={}",
                                 id,
@@ -180,15 +219,67 @@ where
                                     &payload.client_id,
                                     &id,
                                     ExecHistoryEntry {
-                                        command: payload.command,
-                                        stdout: payload.stdout,
-                                        stderr: payload.stderr,
+                                        command: command_clone,
+                                        stdout: stdout_clone,
+                                        stderr: stderr_clone,
                                         exit_code: payload.exit_code,
                                         duration_ms: payload.duration_ms,
-                                        cwd: payload.cwd,
-                                        env: payload.env,
+                                        cwd: cwd_clone,
+                                        env: env_clone,
                                     },
                                 );
+                            }
+                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
+                                active_connection_id.clone(),
+                                manager.lock(),
+                                db.lock(),
+                            ) {
+                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
+                                    let data_json = serde_json::to_string(&serde_json::json!({
+                                        "command": payload.command,
+                                        "stdout": payload.stdout,
+                                        "stderr": payload.stderr,
+                                        "exit_code": payload.exit_code,
+                                        "cwd": payload.cwd,
+                                        "env": payload.env,
+                                    }))
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                    let _ = db.insert_command_history(
+                                        &meta.connection_id,
+                                        &meta.install_id,
+                                        "exec",
+                                        true,
+                                        &data_json,
+                                        "",
+                                        duration_clone,
+                                        unix_timestamp(),
+                                    );
+                                }
+                            }
+                        }
+                        ClientToServerMessage::ToolResult { id, payload } => {
+                            if let Ok(mut mgr) = manager.lock() {
+                                mgr.record_tool_result(&id, payload.clone());
+                            }
+                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
+                                active_connection_id.clone(),
+                                manager.lock(),
+                                db.lock(),
+                            ) {
+                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
+                                    let data_json = serde_json::to_string(&payload.data)
+                                        .unwrap_or_else(|_| "null".to_string());
+                                    let _ = db.insert_command_history(
+                                        &meta.connection_id,
+                                        &meta.install_id,
+                                        &payload.tool_name,
+                                        payload.ok,
+                                        &data_json,
+                                        &payload.error,
+                                        payload.duration_ms,
+                                        unix_timestamp(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -197,7 +288,21 @@ where
         }
     }
 
+    if let Some(connection_id) = active_connection_id {
+        if let Ok(db) = db.lock() {
+            let _ = db.mark_offline(&connection_id, unix_timestamp());
+        }
+    }
+
     Ok(())
+}
+
+fn unix_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn build_tls_acceptor(

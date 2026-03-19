@@ -43,7 +43,7 @@ pub struct AuthSection {
 }
 
 impl ServerConfig {
-    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let contents = fs::read_to_string(path)?;
         let config = toml::from_str(&contents)?;
         Ok(config)

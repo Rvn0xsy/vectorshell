@@ -2,6 +2,7 @@ mod agent;
 mod builder;
 mod client_manager;
 mod config;
+mod db;
 mod ui;
 mod websocket;
 
@@ -9,6 +10,7 @@ use crate::agent::Agent;
 use crate::builder::generate_client_binary;
 use crate::client_manager::ClientManager;
 use crate::config::ServerConfig;
+use crate::db::Db;
 use crate::ui::{prompt_line, set_prompt, set_waiting, ui_print, UiState};
 use crate::websocket::run_websocket_server;
 use std::sync::{Arc, Mutex};
@@ -17,7 +19,7 @@ use std::io::Write;
 use tracing_appender::rolling;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     init_logging();
 
     let args: Vec<String> = std::env::args().collect();
@@ -52,17 +54,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("loaded config from {}", config_path);
     let agent = Agent::new(&config);
     let manager = Arc::new(Mutex::new(ClientManager::new()));
+    let db = Arc::new(Mutex::new(Db::open("data/vectorshell.db")?));
     let ui_state = Arc::new(Mutex::new(UiState::default()));
 
     let manager_for_ws = Arc::clone(&manager);
+    let db_for_ws = Arc::clone(&db);
     let ui_for_ws = Arc::clone(&ui_state);
     let ws_handle = tokio::spawn(async move {
-        if let Err(error) = run_websocket_server(config, manager_for_ws, ui_for_ws).await {
+        if let Err(error) = run_websocket_server(config, manager_for_ws, db_for_ws, ui_for_ws).await {
             tracing::error!(%error, "websocket server failed");
         }
     });
 
-    run_repl(manager, agent, ui_state).await;
+    run_repl(manager, db, agent, ui_state).await;
 
     ws_handle.await?;
     Ok(())
@@ -155,6 +159,7 @@ impl AgentContext {
 
 async fn run_repl(
     manager: Arc<Mutex<ClientManager>>,
+    db: Arc<Mutex<Db>>,
     agent: Agent,
     ui_state: Arc<Mutex<UiState>>,
 ) {
@@ -195,18 +200,93 @@ async fn run_repl(
             } else {
                 ui_print(&ui_state, "Info", "clients:");
                 for client in clients {
-                    ui_print(&ui_state, "Info", &format!("- {client}"));
+                    ui_print(
+                        &ui_state,
+                        "Info",
+                        &format!(
+                            "- conn={} host={} user={} pid={} ip={} build={}",
+                            client.connection_id,
+                            client.hostname,
+                            client.username,
+                            client.pid,
+                            client.ip,
+                            client.build_uuid
+                        ),
+                    );
                 }
             }
             continue;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("/use ") {
-            selected_client = Some(rest.trim().to_string());
-            agent_mode = true;
+        if trimmed == "/info" {
+            if let Some(client_id) = selected_client.clone() {
+                if let Ok(mgr) = manager.lock() {
+                    if let Some(meta) = mgr.get_client_metadata(&client_id) {
+                        ui_print(
+                            &ui_state,
+                            "Info",
+                            &format!(
+                                "connection_id={} hostname={} user={} pid={} ip={} os={} arch={} build_uuid={} install_id={} last_heartbeat={}",
+                                meta.connection_id,
+                                meta.hostname,
+                                meta.username,
+                                meta.pid,
+                                meta.ip,
+                                meta.os,
+                                meta.arch,
+                                meta.build_uuid,
+                                meta.install_id,
+                                meta.last_heartbeat
+                            ),
+                        );
+                    } else {
+                        ui_print(&ui_state, "Error", "selected client not found");
+                    }
+                }
+            } else {
+                ui_print(&ui_state, "Error", "no client selected. use `/use <connection_id>`");
+            }
+            continue;
+        }
+
+        if trimmed == "/clean" {
             context.clear();
-            tracing::info!(client_id = %rest.trim(), "selected client");
-            ui_print(&ui_state, "Info", &format!("selected client: {}", rest.trim()));
+            if let Some(client_id) = selected_client.clone() {
+                let install_id = manager
+                    .lock()
+                    .ok()
+                    .and_then(|mgr| mgr.get_client_metadata(&client_id))
+                    .map(|m| m.install_id)
+                    .unwrap_or_default();
+                if !install_id.is_empty() {
+                    if let Ok(db) = db.lock() {
+                        let _ = db.clear_install_history(&install_id);
+                    }
+                }
+            }
+            ui_print(&ui_state, "Info", "current history cleared");
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/use ") {
+            let wanted = rest.trim();
+            let mapped = manager
+                .lock()
+                .ok()
+                .and_then(|mgr| {
+                    mgr.get_by_connection_id(wanted)
+                        .or_else(|| mgr.get_client_metadata(wanted))
+                })
+                .map(|m| m.client_id);
+            if let Some(client_id) = mapped {
+                selected_client = Some(client_id.clone());
+                agent_mode = true;
+                context.clear();
+                tracing::info!(client_id = %client_id, "selected client");
+                ui_print(&ui_state, "Info", &format!("selected client: {}", wanted));
+            } else {
+                ui_print(&ui_state, "Error", "client not found (use /sessions)");
+            }
             continue;
         }
 
@@ -235,8 +315,107 @@ async fn run_repl(
             }
             continue;
         }
+
+        if let Some(rest) = trimmed.strip_prefix("/tool ") {
+            if let Some(client_id) = selected_client.clone() {
+                let mut parts = rest.trim().splitn(2, ' ');
+                let tool_name = parts.next().unwrap_or("").trim();
+                if tool_name.is_empty() {
+                    ui_print(&ui_state, "Error", "usage: /tool <tool_name> <json_args>");
+                    continue;
+                }
+                let args_raw = parts.next().unwrap_or("{}").trim();
+                let args = match serde_json::from_str::<serde_json::Value>(args_raw) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        ui_print(&ui_state, "Error", &format!("invalid json args: {error}"));
+                        continue;
+                    }
+                };
+                context.push(format!("ManualTool: {} {}", tool_name, args));
+                append_manual_tool_history(&db, &manager, &client_id, tool_name, &args);
+                dispatch_tool_and_print(&manager, &ui_state, &client_id, tool_name, args).await;
+            } else {
+                ui_print(&ui_state, "Error", "no client selected. use `/use <connection_id>`");
+            }
+            continue;
+        }
+
+        if let Some(path) = trimmed.strip_prefix("/read ") {
+            if let Some(client_id) = selected_client.clone() {
+                let path = path.trim();
+                if path.is_empty() {
+                    ui_print(&ui_state, "Error", "usage: /read <path>");
+                    continue;
+                }
+                let args = serde_json::json!({ "path": path });
+                context.push(format!("ManualTool: read_file {}", args));
+                append_manual_tool_history(&db, &manager, &client_id, "read_file", &args);
+                dispatch_tool_and_print(&manager, &ui_state, &client_id, "read_file", args).await;
+            } else {
+                ui_print(&ui_state, "Error", "no client selected. use `/use <connection_id>`");
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/write ") {
+            if let Some(client_id) = selected_client.clone() {
+                let mut parts = rest.trim().splitn(2, ' ');
+                let path = parts.next().unwrap_or("").trim();
+                let content = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    ui_print(&ui_state, "Error", "usage: /write <path> <content>");
+                    continue;
+                }
+                let args = serde_json::json!({ "path": path, "content": content });
+                context.push(format!("ManualTool: write_file {}", args));
+                append_manual_tool_history(&db, &manager, &client_id, "write_file", &args);
+                dispatch_tool_and_print(&manager, &ui_state, &client_id, "write_file", args).await;
+            } else {
+                ui_print(&ui_state, "Error", "no client selected. use `/use <connection_id>`");
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("/upload ") {
+            if let Some(client_id) = selected_client.clone() {
+                let mut parts = rest.trim().splitn(2, ' ');
+                let src = parts.next().unwrap_or("").trim();
+                let dst = parts.next().unwrap_or("").trim();
+                if src.is_empty() || dst.is_empty() {
+                    ui_print(&ui_state, "Error", "usage: /upload <src> <dst>");
+                    continue;
+                }
+                let args = serde_json::json!({ "src": src, "dst": dst });
+                context.push(format!("ManualTool: upload_file {}", args));
+                append_manual_tool_history(&db, &manager, &client_id, "upload_file", &args);
+                dispatch_tool_and_print(&manager, &ui_state, &client_id, "upload_file", args).await;
+            } else {
+                ui_print(&ui_state, "Error", "no client selected. use `/use <connection_id>`");
+            }
+            continue;
+        }
+
+        if let Some(path) = trimmed.strip_prefix("/download ") {
+            if let Some(client_id) = selected_client.clone() {
+                let mut parts = path.trim().splitn(2, ' ');
+                let src = parts.next().unwrap_or("").trim();
+                let dst = parts.next().unwrap_or("").trim();
+                if src.is_empty() || dst.is_empty() {
+                    ui_print(&ui_state, "Error", "usage: /download <src> <dst>");
+                    continue;
+                }
+                let args = serde_json::json!({ "src": src, "dst": dst });
+                context.push(format!("ManualTool: download_file {}", args));
+                append_manual_tool_history(&db, &manager, &client_id, "download_file", &args);
+                dispatch_tool_and_print(&manager, &ui_state, &client_id, "download_file", args).await;
+            } else {
+                ui_print(&ui_state, "Error", "no client selected. use `/use <connection_id>`");
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix("/agent ") {
-            let prompt = build_agent_prompt(&manager, &selected_client, &context, rest.trim());
+            let prompt = build_agent_prompt(&manager, &db, &selected_client, &context, rest.trim());
             let start = std::time::Instant::now();
             tracing::info!("ai.request.start type=text");
             tracing::debug!("ai.request.prompt: {}", prompt);
@@ -247,6 +426,19 @@ async fn run_repl(
                     tracing::debug!("ai.response.text: {}", answer);
                     ui_print(&ui_state, "Agent", &answer);
                     context.push(format!("AI: {}", answer));
+                    if let Some(client_id) = selected_client.clone() {
+                        if let Some(install_id) = manager
+                            .lock()
+                            .ok()
+                            .and_then(|mgr| mgr.get_client_metadata(&client_id))
+                            .map(|m| m.install_id)
+                        {
+                            if let Ok(db) = db.lock() {
+                                let _ = db.insert_chat(&install_id, "user", rest.trim(), unix_timestamp());
+                                let _ = db.insert_chat(&install_id, "assistant", &answer, unix_timestamp());
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
                     let elapsed = start.elapsed().as_millis();
@@ -259,7 +451,7 @@ async fn run_repl(
 
         if agent_mode {
             if let Some(client_id) = selected_client.clone() {
-                let prompt = build_agent_prompt(&manager, &selected_client, &context, trimmed);
+                let prompt = build_agent_prompt(&manager, &db, &selected_client, &context, trimmed);
                 let start = std::time::Instant::now();
                 tracing::info!("ai.request.start type=tool");
                 tracing::debug!("ai.request.prompt: {}", prompt);
@@ -274,6 +466,17 @@ async fn run_repl(
                         ui_print(&ui_state, "Agent", &answer);
                         context.push(format!("User: {}", trimmed));
                         context.push(format!("AI: {}", answer));
+                        if let Some(install_id) = manager
+                            .lock()
+                            .ok()
+                            .and_then(|mgr| mgr.get_client_metadata(&client_id))
+                            .map(|m| m.install_id)
+                        {
+                            if let Ok(db) = db.lock() {
+                                let _ = db.insert_chat(&install_id, "user", trimmed, unix_timestamp());
+                                let _ = db.insert_chat(&install_id, "assistant", &answer, unix_timestamp());
+                            }
+                        }
                     }
                     Err(error) => {
                         let elapsed = start.elapsed().as_millis();
@@ -294,8 +497,15 @@ async fn run_repl(
 fn print_repl_help() {
     let ui_state = Arc::new(Mutex::new(UiState::default()));
     ui_print(&ui_state, "Info", "/sessions               List connected clients");
-    ui_print(&ui_state, "Info", "/use <client_id>        Select a client (enters agent mode)");
+    ui_print(&ui_state, "Info", "/use <connection_id>    Select a client (enters agent mode)");
+    ui_print(&ui_state, "Info", "/info                   Show selected session details");
+    ui_print(&ui_state, "Info", "/clean                  Clear selected install history + context");
     ui_print(&ui_state, "Info", "/exec <command>         Execute raw command on selected client");
+    ui_print(&ui_state, "Info", "/tool <name> <json>    Dispatch generic tool call to selected client");
+    ui_print(&ui_state, "Info", "/read <path>            Shortcut for read_file tool");
+    ui_print(&ui_state, "Info", "/write <path> <content> Shortcut for write_file tool");
+    ui_print(&ui_state, "Info", "/upload <src> <dst>     Upload server-local file to client path");
+    ui_print(&ui_state, "Info", "/download <src> <dst>   Download client file to server-local path");
     ui_print(&ui_state, "Info", "/agent <prompt>         Ask AI for a text response only");
     ui_print(&ui_state, "Info", "/clear                  Clear agent context history");
     ui_print(&ui_state, "Info", "/back                   Exit agent mode / unselect client");
@@ -304,6 +514,7 @@ fn print_repl_help() {
 
 fn build_agent_prompt(
     manager: &Arc<Mutex<ClientManager>>,
+    db: &Arc<Mutex<Db>>,
     selected_client: &Option<String>,
     context: &AgentContext,
     user_input: &str,
@@ -315,11 +526,27 @@ fn build_agent_prompt(
             if let Some(metadata) = mgr.get_client_metadata(client_id) {
                 prompt.push_str("Client Info:\n");
                 prompt.push_str(&format!("client_id: {}\n", metadata.client_id));
+                prompt.push_str(&format!("connection_id: {}\n", metadata.connection_id));
+                prompt.push_str(&format!("install_id: {}\n", metadata.install_id));
+                prompt.push_str(&format!("build_uuid: {}\n", metadata.build_uuid));
                 prompt.push_str(&format!("hostname: {}\n", metadata.hostname));
+                prompt.push_str(&format!("username: {}\n", metadata.username));
+                prompt.push_str(&format!("pid: {}\n", metadata.pid));
                 prompt.push_str(&format!("os: {}\n", metadata.os));
                 prompt.push_str(&format!("arch: {}\n", metadata.arch));
                 prompt.push_str(&format!("ip: {}\n", metadata.ip));
                 prompt.push_str(&format!("timestamp: {}\n", metadata.registered_at));
+                if let Ok(db) = db.lock() {
+                    if let Ok(history) = db.read_recent_chat(&metadata.install_id, 20) {
+                        if !history.is_empty() {
+                            prompt.push_str("Recent Chat History:\n");
+                            for (role, content) in history {
+                                prompt.push_str(&format!("{}: {}\n", role, content));
+                            }
+                            prompt.push('\n');
+                        }
+                    }
+                }
                 prompt.push('\n');
             }
 
@@ -355,4 +582,83 @@ fn build_agent_prompt(
     prompt.push_str(&context.as_prompt());
     prompt.push_str(&format!("User: {}", user_input));
     prompt
+}
+
+fn unix_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn dispatch_tool_and_print(
+    manager: &Arc<Mutex<ClientManager>>,
+    ui_state: &Arc<Mutex<UiState>>,
+    client_id: &str,
+    tool_name: &str,
+    args: serde_json::Value,
+) {
+    let receiver = {
+        let mut mgr = match manager.lock() {
+            Ok(mgr) => mgr,
+            Err(error) => {
+                ui_print(ui_state, "Error", &format!("manager lock failed: {error}"));
+                return;
+            }
+        };
+        match mgr.dispatch_tool_call(client_id, tool_name, args, Some(60_000)) {
+            Ok((_, rx)) => rx,
+            Err(error) => {
+                ui_print(ui_state, "Error", &format!("dispatch failed: {error}"));
+                return;
+            }
+        }
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(65), receiver).await {
+        Ok(Ok(result)) => {
+            if result.ok {
+                let rendered = serde_json::to_string_pretty(&result.data)
+                    .unwrap_or_else(|_| result.data.to_string());
+                ui_print(ui_state, "Tool", &format!("{} ok\n{}", result.tool_name, rendered));
+            } else {
+                ui_print(
+                    ui_state,
+                    "Tool",
+                    &format!("{} failed: {}", result.tool_name, result.error),
+                );
+            }
+        }
+        Ok(Err(_)) => {
+            ui_print(ui_state, "Error", "tool result channel closed");
+        }
+        Err(_) => {
+            ui_print(ui_state, "Error", "tool request timed out");
+        }
+    }
+}
+
+fn append_manual_tool_history(
+    db: &Arc<Mutex<Db>>,
+    manager: &Arc<Mutex<ClientManager>>,
+    client_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+) {
+    let install_id = manager
+        .lock()
+        .ok()
+        .and_then(|mgr| mgr.get_client_metadata(client_id))
+        .map(|m| m.install_id);
+    if let Some(install_id) = install_id {
+        if let Ok(db) = db.lock() {
+            let _ = db.insert_chat(
+                &install_id,
+                "user",
+                &format!("manual_tool {} {}", tool_name, args),
+                unix_timestamp(),
+            );
+        }
+    }
 }

@@ -14,3 +14,8 @@ pub const INSECURE_TLS_RAW: &str = match option_env!("VECTOR_INSECURE_TLS") {
     Some(value) => value,
     None => "false",
 };
+
+pub const BUILD_UUID: &str = match option_env!("VECTOR_BUILD_UUID") {
+    Some(value) => value,
+    None => "dev-build",
+};

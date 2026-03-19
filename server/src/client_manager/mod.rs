@@ -1,36 +1,56 @@
-use shared::protocol::{ExecMessage, ServerToClientMessage};
+use shared::protocol::{ExecMessage, ServerToClientMessage, ToolCallMessage, ToolResultMessage};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct ClientMetadata {
     pub client_id: String,
+    pub connection_id: String,
+    pub install_id: String,
+    pub build_uuid: String,
     pub last_heartbeat: u64,
     pub hostname: String,
+    pub username: String,
+    pub pid: u32,
     pub os: String,
     pub arch: String,
     pub ip: String,
     pub registered_at: u64,
+    pub capabilities: Vec<String>,
 }
 
 impl ClientMetadata {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client_id: String,
+        connection_id: String,
+        install_id: String,
+        build_uuid: String,
         hostname: String,
+        username: String,
+        pid: u32,
         os: String,
         arch: String,
         ip: String,
         registered_at: u64,
+        capabilities: Vec<String>,
     ) -> Self {
         Self {
             client_id,
+            connection_id,
+            install_id,
+            build_uuid,
             last_heartbeat: 0,
             hostname,
+            username,
+            pid,
             os,
             arch,
             ip,
             registered_at,
+            capabilities,
         }
     }
 }
@@ -39,13 +59,6 @@ impl ClientMetadata {
 pub struct ClientConnection {
     pub sender: mpsc::UnboundedSender<ServerToClientMessage>,
     pub metadata: ClientMetadata,
-}
-
-#[derive(Debug, Default)]
-pub struct ClientManager {
-    clients: HashMap<String, ClientConnection>,
-    exec_history: HashMap<String, Vec<ExecHistoryEntry>>,
-    pending_exec: HashMap<String, oneshot::Sender<ExecHistoryEntry>>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,12 +72,21 @@ pub struct ExecHistoryEntry {
     pub env: Vec<(String, String)>,
 }
 
+#[derive(Debug, Default)]
+pub struct ClientManager {
+    clients: HashMap<String, ClientConnection>,
+    exec_history: HashMap<String, Vec<ExecHistoryEntry>>,
+    pending_exec: HashMap<String, oneshot::Sender<ExecHistoryEntry>>,
+    pending_tool: HashMap<String, oneshot::Sender<ToolResultMessage>>,
+}
+
 impl ClientManager {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
             exec_history: HashMap::new(),
             pending_exec: HashMap::new(),
+            pending_tool: HashMap::new(),
         }
     }
 
@@ -74,13 +96,19 @@ impl ClientManager {
         sender: mpsc::UnboundedSender<ServerToClientMessage>,
         metadata: ClientMetadata,
     ) {
-        tracing::info!(client_id = %metadata.client_id, "client connected");
+        tracing::info!(client_id = %metadata.client_id, connection_id = %metadata.connection_id, "client connected");
         self.clients
             .insert(client_id, ClientConnection { sender, metadata });
     }
 
-    pub fn list_clients(&self) -> Vec<String> {
-        self.clients.keys().cloned().collect()
+    pub fn list_clients(&self) -> Vec<ClientMetadata> {
+        let mut list = self
+            .clients
+            .values()
+            .map(|c| c.metadata.clone())
+            .collect::<Vec<_>>();
+        list.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
+        list
     }
 
     pub fn get_client_metadata(&self, client_id: &str) -> Option<ClientMetadata> {
@@ -89,18 +117,44 @@ impl ClientManager {
             .map(|conn| conn.metadata.clone())
     }
 
+    pub fn get_by_connection_id(&self, connection_id: &str) -> Option<ClientMetadata> {
+        self.clients
+            .values()
+            .find(|conn| conn.metadata.connection_id == connection_id)
+            .map(|conn| conn.metadata.clone())
+    }
+
     pub fn record_exec_result(&mut self, client_id: &str, exec_id: &str, entry: ExecHistoryEntry) {
         self.exec_history
             .entry(client_id.to_string())
             .or_default()
-            .push(entry.clone());
+            .push(entry);
 
         if exec_id.is_empty() {
             return;
         }
 
         if let Some(sender) = self.pending_exec.remove(exec_id) {
-            let _ = sender.send(entry);
+            let _ = sender.send(
+                self.exec_history
+                    .get(client_id)
+                    .and_then(|v| v.last().cloned())
+                    .unwrap_or(ExecHistoryEntry {
+                        command: String::new(),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: -1,
+                        duration_ms: 0,
+                        cwd: String::new(),
+                        env: Vec::new(),
+                    }),
+            );
+        }
+    }
+
+    pub fn record_tool_result(&mut self, tool_id: &str, result: ToolResultMessage) {
+        if let Some(sender) = self.pending_tool.remove(tool_id) {
+            let _ = sender.send(result);
         }
     }
 
@@ -119,7 +173,7 @@ impl ClientManager {
 
         tracing::info!(client_id = %client_id, command = %command, "dispatching exec");
         let msg = ServerToClientMessage::Exec {
-            id: uuid_v4(),
+            id: Uuid::new_v4().to_string(),
             payload: ExecMessage {
                 command: command.to_string(),
             },
@@ -131,33 +185,50 @@ impl ClientManager {
             .map_err(|_| "failed to send command".to_string())
     }
 
-    pub fn dispatch_exec(
+    pub fn dispatch_tool_call(
         &mut self,
         client_id: &str,
-        command: &str,
-    ) -> Result<oneshot::Receiver<ExecHistoryEntry>, String> {
+        tool_name: &str,
+        args: serde_json::Value,
+        timeout_ms: Option<u64>,
+    ) -> Result<(String, oneshot::Receiver<ToolResultMessage>), String> {
         let connection = self
             .clients
             .get(client_id)
             .ok_or_else(|| "client not found".to_string())?;
 
-        tracing::info!(client_id = %client_id, command = %command, "dispatching exec (tool)");
-        let exec_id = uuid_v4();
-        let msg = ServerToClientMessage::Exec {
-            id: exec_id.clone(),
-            payload: ExecMessage {
-                command: command.to_string(),
+        if !connection.metadata.capabilities.is_empty()
+            && !connection
+                .metadata
+                .capabilities
+                .iter()
+                .any(|cap| cap == tool_name)
+        {
+            return Err(format!(
+                "client does not support tool '{}'; capabilities={}",
+                tool_name,
+                connection.metadata.capabilities.join(",")
+            ));
+        }
+
+        let tool_id = Uuid::new_v4().to_string();
+        let msg = ServerToClientMessage::ToolCall {
+            id: tool_id.clone(),
+            payload: ToolCallMessage {
+                tool_name: tool_name.to_string(),
+                args,
+                timeout_ms,
             },
         };
 
         connection
             .sender
             .send(msg)
-            .map_err(|_| "failed to send command".to_string())?;
+            .map_err(|_| "failed to send tool call".to_string())?;
 
         let (tx, rx) = oneshot::channel();
-        self.pending_exec.insert(exec_id, tx);
-        Ok(rx)
+        self.pending_tool.insert(tool_id.clone(), tx);
+        Ok((tool_id, rx))
     }
 
     pub fn update_heartbeat(&mut self, client_id: &str, timestamp: u64) {
@@ -165,12 +236,4 @@ impl ClientManager {
             conn.metadata.last_heartbeat = timestamp;
         }
     }
-}
-
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}-{}", now.as_secs(), now.subsec_nanos())
 }

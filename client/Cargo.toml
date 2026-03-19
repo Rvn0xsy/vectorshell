@@ -13,6 +13,8 @@ tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 tokio-rustls = "0.25"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

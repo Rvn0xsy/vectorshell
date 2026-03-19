@@ -1,5 +1,7 @@
-use crate::embedded_config::{AUTH_TOKEN, INSECURE_TLS_RAW, RECONNECT_INTERVAL_SECS, SERVER_URL};
-use crate::executor::execute_command;
+use crate::embedded_config::{
+    AUTH_TOKEN, BUILD_UUID, INSECURE_TLS_RAW, RECONNECT_INTERVAL_SECS, SERVER_URL,
+};
+use crate::executor::{capabilities, decode_tool_result_as_exec, execute_command, execute_tool};
 use futures_util::{SinkExt, StreamExt};
 use shared::protocol::{
     ClientToServerMessage, HeartbeatMessage, RegisterMessage, ServerToClientMessage,
@@ -18,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
     connect_async, connect_async_tls_with_config, Connector, WebSocketStream,
 };
+use uuid::Uuid;
 
 #[cfg(windows)]
 use std::io;
@@ -72,8 +75,10 @@ where
     let (mut write, mut read) = ws_stream.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientToServerMessage>();
 
-    let client_id = generate_client_id();
-    let (hostname, os, arch, ip, timestamp) = collect_client_metadata();
+    let install_id = load_or_create_install_id().await;
+    let connection_id = Uuid::new_v4().to_string();
+    let client_id = connection_id.clone();
+    let (hostname, os, arch, ip, timestamp, username, pid) = collect_client_metadata();
     let register = ClientToServerMessage::Register {
         id: uuid_v4(),
         payload: RegisterMessage {
@@ -84,6 +89,12 @@ where
             arch,
             ip,
             timestamp,
+            username,
+            pid,
+            build_uuid: BUILD_UUID.to_string(),
+            install_id,
+            connection_id: connection_id.clone(),
+            capabilities: capabilities(),
         },
     };
     tx.send(register).ok();
@@ -121,10 +132,29 @@ where
             let parsed: ServerToClientMessage = serde_json::from_str(&text)?;
             match parsed {
                 ServerToClientMessage::Exec { id, payload } => {
-                    let result = execute_command(payload).await;
+                    let result = execute_command(&client_id, payload).await;
                     let result_msg = ClientToServerMessage::Result {
                         id,
                         payload: result,
+                    };
+                    tx.send(result_msg).ok();
+                }
+                ServerToClientMessage::ToolCall { id, payload } => {
+                    let tool_result = execute_tool(&client_id, &payload).await;
+
+                    if payload.tool_name == "exec" {
+                        if let Ok(exec_result) = decode_tool_result_as_exec(&tool_result).await {
+                            let result_msg = ClientToServerMessage::Result {
+                                id: id.clone(),
+                                payload: exec_result,
+                            };
+                            tx.send(result_msg).ok();
+                        }
+                    }
+
+                    let result_msg = ClientToServerMessage::ToolResult {
+                        id,
+                        payload: tool_result,
                     };
                     tx.send(result_msg).ok();
                 }
@@ -426,12 +456,7 @@ async fn connect_once_via_proxy(
     }
 }
 
-fn generate_client_id() -> String {
-    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "client".to_string());
-    format!("{}-{}", hostname, uuid_v4())
-}
-
-fn collect_client_metadata() -> (String, String, String, String, u64) {
+fn collect_client_metadata() -> (String, String, String, String, u64, String, u32) {
     let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "client".to_string());
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
@@ -439,7 +464,50 @@ fn collect_client_metadata() -> (String, String, String, String, u64) {
         .map(|addr| addr.to_string())
         .unwrap_or_else(|_| "".to_string());
     let timestamp = unix_timestamp();
-    (hostname, os, arch, ip, timestamp)
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let pid = std::process::id();
+    (hostname, os, arch, ip, timestamp, username, pid)
+}
+
+async fn load_or_create_install_id() -> String {
+    let path = install_id_file_path();
+    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let install_id = Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(&path, install_id.as_bytes()).await;
+    install_id
+}
+
+fn install_id_file_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            return std::path::PathBuf::from(appdata)
+                .join("vectorshell")
+                .join("install_id");
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home)
+                .join(".vectorshell")
+                .join("install_id");
+        }
+    }
+
+    std::path::PathBuf::from("install_id")
 }
 
 fn uuid_v4() -> String {

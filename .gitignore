@@ -16,6 +16,11 @@ config/*.local.toml
 config/certs/*.pem
 config/certs/*.key
 config/certs/*.crt
+config/SOUL.md
+
+# Local runtime data
+/data/
+*.db
 
 # Editors / OS
 .idea/

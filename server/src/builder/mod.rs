@@ -2,11 +2,12 @@ use crate::config::ServerConfig;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use uuid::Uuid;
 
 pub fn generate_client_binary(
     config: &ServerConfig,
     target: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut command = Command::new("cargo");
     command.args(["build", "-p", "vectorshell-client", "--release"]);
 
@@ -17,6 +18,7 @@ pub fn generate_client_binary(
     let status = command
         .env("VECTOR_SERVER_URL", &config.client.default_server)
         .env("VECTOR_AUTH_TOKEN", &config.auth.token)
+        .env("VECTOR_BUILD_UUID", Uuid::new_v4().to_string())
         .env(
             "VECTOR_INSECURE_TLS",
             config.client.insecure_tls.unwrap_or(false).to_string(),
@@ -45,7 +47,9 @@ pub fn generate_client_binary(
     Ok(())
 }
 
-fn client_binary_path(target: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn client_binary_path(
+    target: Option<&str>,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
     let mut path = PathBuf::from(target_dir);
 
