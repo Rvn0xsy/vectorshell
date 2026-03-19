@@ -1,0 +1,36 @@
+# VectorShell example configuration (safe to commit)
+# Copy this file to `config/config.toml` and fill in real values.
+
+[server]
+# WebSocket listen address
+listen = "0.0.0.0:8080"
+# WebSocket endpoint path
+ws_path = "/ws"
+
+[tls]
+# Set true to enable wss:// on server
+enabled = false
+# PEM certificate path (used when enabled=true)
+cert_path = "config/certs/cert.pem"
+# PEM private key path (used when enabled=true)
+key_path = "config/certs/key.pem"
+
+[agent]
+# LLM model name
+model = "gpt-5.2-codex"
+# Optional OpenAI-compatible endpoint
+base_url = "https://api.openai.com/v1"
+# Leave empty in repo; set real key locally or via env
+api_key = ""
+
+[client]
+# Default callback address embedded into generated clients
+default_server = "ws://127.0.0.1:8080/ws"
+# Reconnect interval (seconds)
+reconnect_interval = 5
+# For self-signed cert testing with wss://
+insecure_tls = false
+
+[auth]
+# Shared auth token between server and generated clients
+token = "change-me-strong-random-token"
