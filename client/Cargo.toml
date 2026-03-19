@@ -1,0 +1,19 @@
+[package]
+name = "vectorshell-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures-util = "0.3"
+local-ip-address = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shared = { path = "../shared" }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+tokio-rustls = "0.25"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinHttp", "Win32_Foundation"] }

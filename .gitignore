@@ -1,0 +1,24 @@
+# Rust
+/target/
+
+# Generated client artifacts
+/build/
+
+# Runtime logs
+/logs/
+*.log
+
+# Local/private configuration and secrets
+.env
+.env.*
+config/config.toml
+config/*.local.toml
+config/certs/*.pem
+config/certs/*.key
+config/certs/*.crt
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
