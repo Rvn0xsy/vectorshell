@@ -175,6 +175,28 @@ impl Db {
         Ok(out)
     }
 
+    pub fn read_chat_history(
+        &self,
+        install_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, u64)>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT role, content, created_at FROM chat_history WHERE install_id=?1 ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![install_id, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn clear_install_history(
         &self,
         install_id: &str,

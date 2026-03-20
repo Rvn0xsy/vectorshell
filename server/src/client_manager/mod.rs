@@ -1,10 +1,11 @@
+use serde::Serialize;
 use shared::protocol::{ExecMessage, ServerToClientMessage, ToolCallMessage, ToolResultMessage};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ClientMetadata {
     pub client_id: String,
     pub connection_id: String,

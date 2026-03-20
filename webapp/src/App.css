@@ -1,0 +1,218 @@
+.app {
+  min-height: 100vh;
+  background: #f6f8fa;
+  color: #24292f;
+}
+
+.topbar {
+  height: 56px;
+  border-bottom: 1px solid #d0d7de;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+}
+
+.topbar h1 { font-size: 18px; margin: 0; }
+.gear { border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 12px;
+  padding: 12px;
+  height: calc(100vh - 56px);
+}
+
+.session-panel,
+.chat-panel {
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 80px);
+  min-height: calc(100vh - 80px);
+  max-height: calc(100vh - 80px);
+  overflow: hidden;
+}
+
+.session-panel {
+  padding: 10px;
+  overflow: hidden;
+  position: sticky;
+  top: 68px;
+  height: calc(100vh - 80px);
+}
+.panel-title { font-size: 13px; color: #57606a; margin-bottom: 8px; }
+.session-item {
+  text-align: left;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+.session-item.active { border-color: #0969da; background: #f1f8ff; }
+.session-item small { color: #57606a; }
+.refresh { margin-top: 8px; }
+
+.client-card {
+  margin-top: 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.logs-toolbar { display: flex; gap: 8px; margin-top: 12px; }
+.logs-box {
+  margin-top: 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+  padding: 8px;
+  flex: 1;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
+.chat-header {
+  border-bottom: 1px solid #d0d7de;
+  padding: 10px;
+  font-size: 13px;
+  color: #57606a;
+}
+
+.chat-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  background: #f6f8fa;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.bubble {
+  max-width: 72%;
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid #d0d7de;
+  font-size: 15px;
+}
+
+.bubble.left {
+  background: #fff;
+  margin-right: auto;
+}
+
+.bubble.right {
+  background: #dcf8c6;
+  border-color: #b6e7a8;
+  margin-left: auto;
+}
+
+.meta {
+  font-size: 11px;
+  color: #57606a;
+  margin-bottom: 4px;
+}
+
+.tool-row,
+.system-row {
+  text-align: center;
+  font-size: 13px;
+  color: #57606a;
+  margin: 8px 0;
+}
+
+.chat-input {
+  border-top: 1px solid #d0d7de;
+  padding: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.chat-input input,
+.chat-input button,
+.session-panel button,
+.session-panel input,
+.session-panel select,
+.modal input,
+.modal button {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+}
+
+.chat-input input { flex: 1; }
+
+.md pre,
+.stdout,
+.stderr,
+.meta-box pre,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.stdout,
+.stderr,
+.meta-box {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
+.stderr { color: #b42318; }
+.fold { margin-top: 6px; }
+.meta-box { color: #57606a; margin-top: 6px; }
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.3);
+  display: grid;
+  place-items: center;
+}
+
+.modal {
+  width: 460px;
+  max-width: calc(100vw - 24px);
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal h3 { margin: 0; }
+.modal label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #57606a; }
+.row-end { display: flex; justify-content: flex-end; gap: 8px; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; height: auto; }
+  .session-panel {
+    position: static;
+    top: auto;
+    height: auto;
+    min-height: 260px;
+    max-height: none;
+  }
+  .chat-panel {
+    height: auto;
+    min-height: 60dvh;
+    max-height: none;
+  }
+}

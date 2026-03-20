@@ -1,18 +1,20 @@
 mod agent;
+mod api;
 mod builder;
 mod client_manager;
 mod config;
 mod db;
+mod event_bus;
 mod ui;
-mod websocket;
 
 use crate::agent::Agent;
+use crate::api::{ApiState, run_api_server};
 use crate::builder::generate_client_binary;
 use crate::client_manager::ClientManager;
 use crate::config::ServerConfig;
 use crate::db::Db;
+use crate::event_bus::new_event_bus;
 use crate::ui::{prompt_line, set_prompt, set_waiting, ui_print, UiState};
-use crate::websocket::run_websocket_server;
 use std::sync::{Arc, Mutex};
 use tokio::io::{self, AsyncBufReadExt};
 use std::io::Write;
@@ -52,23 +54,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
     tracing::info!("loaded config from {}", config_path);
-    let agent = Agent::new(&config);
+    let agent = Arc::new(Agent::new(&config));
     let manager = Arc::new(Mutex::new(ClientManager::new()));
     let db = Arc::new(Mutex::new(Db::open("data/vectorshell.db")?));
+    let events = new_event_bus();
     let ui_state = Arc::new(Mutex::new(UiState::default()));
 
-    let manager_for_ws = Arc::clone(&manager);
-    let db_for_ws = Arc::clone(&db);
-    let ui_for_ws = Arc::clone(&ui_state);
-    let ws_handle = tokio::spawn(async move {
-        if let Err(error) = run_websocket_server(config, manager_for_ws, db_for_ws, ui_for_ws).await {
-            tracing::error!(%error, "websocket server failed");
+    let api_state = ApiState {
+        manager: Arc::clone(&manager),
+        db: Arc::clone(&db),
+        agent: Arc::clone(&agent),
+        config: config.clone(),
+        auth_token: config.auth.token.clone(),
+        events: Arc::clone(&events),
+        ui_state: Arc::clone(&ui_state),
+        conversations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+    };
+
+    let listen_addr = config.server.listen.clone();
+    let tls_for_server = config.tls.clone();
+
+    let server_handle = tokio::spawn(async move {
+        if let Err(error) = run_api_server(listen_addr, api_state, tls_for_server).await {
+            tracing::error!(%error, "server failed");
         }
     });
 
-    run_repl(manager, db, agent, ui_state).await;
+    run_repl(manager, db, Arc::as_ref(&agent).clone(), ui_state).await;
 
-    ws_handle.await?;
+    server_handle.await?;
     Ok(())
 }
 
@@ -456,7 +470,7 @@ async fn run_repl(
                 tracing::info!("ai.request.start type=tool");
                 tracing::debug!("ai.request.prompt: {}", prompt);
                 match agent
-                    .respond_with_tools(&prompt, Arc::clone(&manager), &client_id, Arc::clone(&ui_state))
+                    .respond_with_tools(&prompt, Arc::clone(&manager), &client_id, Arc::clone(&ui_state), None)
                     .await
                 {
                     Ok(answer) => {

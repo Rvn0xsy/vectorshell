@@ -1,5 +1,5 @@
 use crate::config::ServerConfig;
-use crate::agent::exec_tool::ExecTool;
+use crate::agent::exec_tool::{ExecTool, ToolEventEmitter};
 use crate::agent::file_tools::{DownloadFileTool, ReadFileTool, UploadFileTool, WriteFileTool};
 use crate::ui::UiState;
 use rig::completion::Prompt;
@@ -11,6 +11,7 @@ use serde_json::Value;
 pub mod exec_tool;
 pub mod file_tools;
 
+#[derive(Clone)]
 pub struct Agent {
     model: String,
     base_url: Option<String>,
@@ -59,6 +60,7 @@ impl Agent {
         manager: Arc<Mutex<ClientManager>>,
         client_id: &str,
         ui_state: Arc<Mutex<UiState>>,
+        event_emitter: Option<ToolEventEmitter>,
     ) -> Result<String, anyhow::Error> {
         let api_key = self
             .api_key
@@ -79,26 +81,31 @@ impl Agent {
             client_id.to_string(),
             Arc::clone(&last_tool_output),
             ui_state,
+            event_emitter.clone(),
         );
         let read_tool = ReadFileTool::new(
             Arc::clone(&manager),
             client_id.to_string(),
             Arc::clone(&last_tool_output),
+            event_emitter.clone(),
         );
         let write_tool = WriteFileTool::new(
             Arc::clone(&manager),
             client_id.to_string(),
             Arc::clone(&last_tool_output),
+            event_emitter.clone(),
         );
         let upload_tool = UploadFileTool::new(
             Arc::clone(&manager),
             client_id.to_string(),
             Arc::clone(&last_tool_output),
+            event_emitter.clone(),
         );
         let download_tool = DownloadFileTool::new(
             Arc::clone(&manager),
             client_id.to_string(),
             Arc::clone(&last_tool_output),
+            event_emitter.clone(),
         );
 
         let agent = client
@@ -129,8 +136,13 @@ impl Agent {
 
             let response = agent.prompt(&prompt).await?;
 
-            if let Ok(mut guard) = last_tool_output.lock() {
-                if let Some(output) = guard.take() {
+            let maybe_output = if let Ok(mut guard) = last_tool_output.lock() {
+                guard.take()
+            } else {
+                None
+            };
+
+            if let Some(output) = maybe_output {
                     let signature = tool_call_signature(&output);
                     if let Some(sig) = signature {
                         if last_call_signature.as_deref() == Some(sig.as_str()) {
@@ -160,7 +172,6 @@ impl Agent {
                         serde_json::to_value(output).unwrap_or_else(|_| serde_json::Value::Null),
                     );
                     continue;
-                }
             }
 
             let answer = response.trim();

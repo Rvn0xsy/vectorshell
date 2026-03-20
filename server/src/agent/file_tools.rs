@@ -1,6 +1,7 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use crate::client_manager::ClientManager;
+use crate::agent::exec_tool::ToolEventEmitter;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ pub struct ReadFileTool {
     manager: Arc<Mutex<ClientManager>>,
     client_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
+    event_emitter: Option<ToolEventEmitter>,
 }
 
 #[derive(Clone)]
@@ -23,6 +25,7 @@ pub struct WriteFileTool {
     manager: Arc<Mutex<ClientManager>>,
     client_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
+    event_emitter: Option<ToolEventEmitter>,
 }
 
 #[derive(Clone)]
@@ -30,6 +33,7 @@ pub struct UploadFileTool {
     manager: Arc<Mutex<ClientManager>>,
     client_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
+    event_emitter: Option<ToolEventEmitter>,
 }
 
 #[derive(Clone)]
@@ -37,6 +41,7 @@ pub struct DownloadFileTool {
     manager: Arc<Mutex<ClientManager>>,
     client_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
+    event_emitter: Option<ToolEventEmitter>,
 }
 
 impl ReadFileTool {
@@ -44,11 +49,13 @@ impl ReadFileTool {
         manager: Arc<Mutex<ClientManager>>,
         client_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
+        event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
             client_id,
             last_output,
+            event_emitter,
         }
     }
 }
@@ -58,11 +65,13 @@ impl WriteFileTool {
         manager: Arc<Mutex<ClientManager>>,
         client_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
+        event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
             client_id,
             last_output,
+            event_emitter,
         }
     }
 }
@@ -72,11 +81,13 @@ impl UploadFileTool {
         manager: Arc<Mutex<ClientManager>>,
         client_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
+        event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
             client_id,
             last_output,
+            event_emitter,
         }
     }
 }
@@ -86,11 +97,13 @@ impl DownloadFileTool {
         manager: Arc<Mutex<ClientManager>>,
         client_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
+        event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
             client_id,
             last_output,
+            event_emitter,
         }
     }
 }
@@ -157,6 +170,7 @@ impl Tool for ReadFileTool {
             "read_file",
             serde_json::to_value(args.clone()).map_err(|e| FileToolError(e.to_string()))?,
             Arc::clone(&self.last_output),
+            self.event_emitter.clone(),
         )
         .await
     }
@@ -191,6 +205,7 @@ impl Tool for WriteFileTool {
             "write_file",
             serde_json::to_value(args.clone()).map_err(|e| FileToolError(e.to_string()))?,
             Arc::clone(&self.last_output),
+            self.event_emitter.clone(),
         )
         .await
     }
@@ -239,6 +254,7 @@ impl Tool for UploadFileTool {
                 "upload_file",
                 payload,
                 Arc::clone(&self.last_output),
+                self.event_emitter.clone(),
             )
             .await?;
         }
@@ -295,6 +311,7 @@ impl Tool for DownloadFileTool {
                 "download_file_chunk",
                 serde_json::to_value(payload).map_err(|e| FileToolError(e.to_string()))?,
                 Arc::clone(&self.last_output),
+                self.event_emitter.clone(),
             )
             .await?;
 
@@ -356,14 +373,25 @@ async fn call_remote_tool(
     tool_name: &str,
     args: Value,
     last_output: Arc<Mutex<Option<Value>>>,
+    event_emitter: Option<ToolEventEmitter>,
 ) -> Result<Value, FileToolError> {
     let receiver = {
         let mut mgr = manager
             .lock()
             .map_err(|_| FileToolError("client manager lock failed".to_string()))?;
-        let (_, receiver) = mgr
+        let (request_id, receiver) = mgr
             .dispatch_tool_call(client_id, tool_name, args.clone(), Some(60_000))
             .map_err(FileToolError)?;
+
+        if let Some(emitter) = &event_emitter {
+            emitter(json!({
+                "event": "tool.started",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "args": args.clone(),
+            }));
+        }
         receiver
     };
 
@@ -371,6 +399,18 @@ async fn call_remote_tool(
         .await
         .map_err(|_| FileToolError(format!("{tool_name} timed out")))?
         .map_err(|_| FileToolError(format!("{tool_name} result channel closed")))?;
+
+    if let Some(emitter) = &event_emitter {
+        emitter(json!({
+            "event": "tool.finished",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "tool_name": tool_name,
+            "ok": result.ok,
+            "duration_ms": result.duration_ms,
+            "error": result.error,
+            "data": result.data,
+        }));
+    }
 
     if !result.ok {
         return Err(FileToolError(format!("{tool_name} failed: {}", result.error)));

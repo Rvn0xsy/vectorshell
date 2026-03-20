@@ -7,12 +7,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use crate::ui::{ui_print, UiState};
 
+pub type ToolEventEmitter = Arc<dyn Fn(Value) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ExecTool {
     manager: Arc<Mutex<ClientManager>>,
     client_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
     ui_state: Arc<Mutex<UiState>>,
+    event_emitter: Option<ToolEventEmitter>,
 }
 
 impl ExecTool {
@@ -21,12 +24,14 @@ impl ExecTool {
         client_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
         ui_state: Arc<Mutex<UiState>>,
+        event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
             client_id,
             last_output,
             ui_state,
+            event_emitter,
         }
     }
 }
@@ -83,7 +88,7 @@ impl Tool for ExecTool {
                 .map_err(|_| ExecToolError("client manager lock failed".to_string()))?;
             ui_print(&self.ui_state, "Exec", &args.command);
             let call_args = args.command.clone();
-            let (_, receiver) = mgr
+            let (request_id, receiver) = mgr
                 .dispatch_tool_call(
                     &self.client_id,
                     "exec",
@@ -92,6 +97,17 @@ impl Tool for ExecTool {
                 )
                 .map_err(ExecToolError)?
                 ;
+
+            if let Some(emitter) = &self.event_emitter {
+                emitter(json!({
+                    "event": "tool.started",
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "request_id": request_id,
+                    "tool_name": "exec",
+                    "args": {"command": args.command}
+                }));
+            }
+
             receiver
         };
 
@@ -99,6 +115,18 @@ impl Tool for ExecTool {
             .await
             .map_err(|_| ExecToolError("exec timed out".to_string()))?
             .map_err(|_| ExecToolError("exec result channel closed".to_string()))?;
+
+        if let Some(emitter) = &self.event_emitter {
+            emitter(json!({
+                "event": "tool.finished",
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "tool_name": "exec",
+                "ok": result.ok,
+                "duration_ms": result.duration_ms,
+                "error": result.error,
+                "data": result.data,
+            }));
+        }
 
         if !result.ok {
             return Err(ExecToolError(format!("exec failed: {}", result.error)));

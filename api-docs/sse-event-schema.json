@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vectorshell.local/api-docs/sse-event-schema.json",
+  "title": "VectorShell Conversation SSE Event",
+  "description": "JSON payload schema for events sent over /api/conversations/{conversation_id}/events",
+  "oneOf": [
+    { "$ref": "#/$defs/ConversationStarted" },
+    { "$ref": "#/$defs/AgentMessage" },
+    { "$ref": "#/$defs/ToolStarted" },
+    { "$ref": "#/$defs/ToolProgress" },
+    { "$ref": "#/$defs/ToolFinished" },
+    { "$ref": "#/$defs/ConversationFinished" },
+    { "$ref": "#/$defs/ErrorEvent" }
+  ],
+  "$defs": {
+    "Base": {
+      "type": "object",
+      "properties": {
+        "event": { "type": "string" },
+        "conversation_id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["event", "conversation_id", "timestamp"],
+      "additionalProperties": true
+    },
+    "ConversationStarted": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "conversation.started" },
+            "connection_id": { "type": "string" }
+          },
+          "required": ["connection_id"]
+        }
+      ]
+    },
+    "AgentMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "agent.message" },
+            "role": { "type": "string", "enum": ["assistant", "system", "tool"] },
+            "content": { "type": "string" },
+            "final": { "type": "boolean" }
+          },
+          "required": ["role", "content"]
+        }
+      ]
+    },
+    "ToolStarted": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "tool.started" },
+            "request_id": { "type": "string" },
+            "tool_name": { "type": "string" },
+            "args": { "type": "object", "additionalProperties": true }
+          },
+          "required": ["request_id", "tool_name"]
+        }
+      ]
+    },
+    "ToolProgress": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "tool.progress" },
+            "request_id": { "type": "string" },
+            "tool_name": { "type": "string" },
+            "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "detail": { "type": "string" }
+          },
+          "required": ["request_id", "tool_name", "percent"]
+        }
+      ]
+    },
+    "ToolFinished": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "tool.finished" },
+            "request_id": { "type": "string" },
+            "tool_name": { "type": "string" },
+            "ok": { "type": "boolean" },
+            "duration_ms": { "type": "integer", "minimum": 0 },
+            "data": { "type": "object", "additionalProperties": true },
+            "error": { "type": "string" }
+          },
+          "required": ["request_id", "tool_name", "ok", "duration_ms"]
+        }
+      ]
+    },
+    "ConversationFinished": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "conversation.finished" },
+            "ok": { "type": "boolean" }
+          },
+          "required": ["ok"]
+        }
+      ]
+    },
+    "ErrorEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "error" },
+            "code": { "type": "string" },
+            "message": { "type": "string" }
+          },
+          "required": ["code", "message"]
+        }
+      ]
+    }
+  }
+}

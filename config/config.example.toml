@@ -2,13 +2,13 @@
 # Copy this file to `config/config.toml` and fill in real values.
 
 [server]
-# WebSocket listen address
+# Shared listen address for WebSocket + HTTP API
 listen = "0.0.0.0:8080"
 # WebSocket endpoint path
 ws_path = "/ws"
 
 [tls]
-# Set true to enable wss:// on server
+# Set true to enable TLS for both WebSocket (wss://) and HTTP API (https://)
 enabled = false
 # PEM certificate path (used when enabled=true)
 cert_path = "config/certs/cert.pem"
