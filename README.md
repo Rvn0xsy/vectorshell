@@ -54,7 +54,7 @@ build/clients/
 Generated client embeds these values at compile time:
 
 - `VECTOR_SERVER_URL`
-- `VECTOR_AUTH_TOKEN`
+- `VECTOR_AUTH_TOKEN` (from `auth.client_token`)
 - `VECTOR_RECONNECT_INTERVAL`
 - `VECTOR_INSECURE_TLS`
 

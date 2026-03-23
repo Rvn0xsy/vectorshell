@@ -17,7 +17,7 @@ pub fn generate_client_binary(
 
     let status = command
         .env("VECTOR_SERVER_URL", &config.client.default_server)
-        .env("VECTOR_AUTH_TOKEN", &config.auth.token)
+        .env("VECTOR_AUTH_TOKEN", &config.auth.client_token)
         .env("VECTOR_BUILD_UUID", Uuid::new_v4().to_string())
         .env(
             "VECTOR_INSECURE_TLS",

@@ -54,7 +54,7 @@ build/clients/
 生成的客户端会在编译期嵌入以下参数：
 
 - `VECTOR_SERVER_URL`
-- `VECTOR_AUTH_TOKEN`
+- `VECTOR_AUTH_TOKEN`（来自 `auth.client_token`）
 - `VECTOR_RECONNECT_INTERVAL`
 - `VECTOR_INSECURE_TLS`
 

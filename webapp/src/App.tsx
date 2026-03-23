@@ -43,7 +43,7 @@ function App() {
     () => defaultApiBase,
   )
   const [token, setToken] = useState(
-    () => localStorage.getItem('vectorshell:token') || 'vectorshell-secret',
+    () => localStorage.getItem('vectorshell:token') || 'change-me-api-token',
   )
   const [showSettings, setShowSettings] = useState(false)
 

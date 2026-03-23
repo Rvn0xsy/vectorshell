@@ -39,7 +39,8 @@ pub struct ApiState {
     pub db: Arc<Mutex<Db>>,
     pub agent: Arc<Agent>,
     pub config: ServerConfig,
-    pub auth_token: String,
+    pub api_auth_token: String,
+    pub client_auth_token: String,
     pub events: EventBus,
     pub ui_state: Arc<Mutex<UiState>>,
     pub conversations: Arc<Mutex<HashMap<String, String>>>, // conversation_id -> connection_id
@@ -111,7 +112,7 @@ fn auth(headers: &HeaderMap, state: &ApiState) -> Result<(), Response> {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    let expected = format!("Bearer {}", state.auth_token);
+    let expected = format!("Bearer {}", state.api_auth_token);
     if value == expected {
         Ok(())
     } else {
@@ -181,7 +182,7 @@ async fn handle_ws_socket(
                     let parsed: ClientToServerMessage = serde_json::from_str(text.as_str())?;
                     match parsed {
                         ClientToServerMessage::Register { id: _, payload } => {
-                            if payload.token != state.auth_token {
+                            if payload.token != state.client_auth_token {
                                 tracing::warn!(client_id = %payload.client_id, "authentication failed");
                                 continue;
                             }
@@ -1113,7 +1114,7 @@ async fn conversation_events(
     let authorized = if headers.contains_key("authorization") {
         auth(&headers, &state).is_ok()
     } else {
-        query.token.as_deref() == Some(state.auth_token.as_str())
+        query.token.as_deref() == Some(state.api_auth_token.as_str())
     };
     if !authorized {
         return Err((
@@ -1145,7 +1146,7 @@ async fn session_events(
     let authorized = if headers.contains_key("authorization") {
         auth(&headers, &state).is_ok()
     } else {
-        query.token.as_deref() == Some(state.auth_token.as_str())
+        query.token.as_deref() == Some(state.api_auth_token.as_str())
     };
     if !authorized {
         return Err((
@@ -1319,7 +1320,7 @@ async fn download_artifact(
     let authorized = if headers.contains_key("authorization") {
         auth(&headers, &state).is_ok()
     } else {
-        query.token.as_deref() == Some(state.auth_token.as_str())
+        query.token.as_deref() == Some(state.api_auth_token.as_str())
     };
     if !authorized {
         return Err((
@@ -1403,7 +1404,7 @@ async fn download_generated_client(
     let authorized = if headers.contains_key("authorization") {
         auth(&headers, &state).is_ok()
     } else {
-        query.token.as_deref() == Some(state.auth_token.as_str())
+        query.token.as_deref() == Some(state.api_auth_token.as_str())
     };
     if !authorized {
         return Err((

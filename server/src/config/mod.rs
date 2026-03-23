@@ -39,7 +39,8 @@ pub struct ClientSection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthSection {
-    pub token: String,
+    pub api_token: String,
+    pub client_token: String,
 }
 
 impl ServerConfig {

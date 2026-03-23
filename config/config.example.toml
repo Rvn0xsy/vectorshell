@@ -32,5 +32,7 @@ reconnect_interval = 5
 insecure_tls = false
 
 [auth]
-# Shared auth token between server and generated clients
-token = "change-me-strong-random-token"
+# API token used by webapp/curl Authorization header
+api_token = "change-me-strong-random-api-token"
+# Client token embedded into generated client for WS registration
+client_token = "change-me-strong-random-client-token"

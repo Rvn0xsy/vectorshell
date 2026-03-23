@@ -87,7 +87,8 @@ reconnect_interval = 5
 insecure_tls = false
 
 [auth]
-token = "vectorshell-secret"
+api_token = "change-me-api-token"
+client_token = "change-me-client-token"
 ```
 
 ## Client Generation
@@ -100,7 +101,7 @@ Generate a client binary with embedded config:
 
 This compiles the client with environment variables:
 - `VECTOR_SERVER_URL`
-- `VECTOR_AUTH_TOKEN`
+- `VECTOR_AUTH_TOKEN` (from `auth.client_token`)
 - `VECTOR_RECONNECT_INTERVAL`
 - `VECTOR_INSECURE_TLS`
 
