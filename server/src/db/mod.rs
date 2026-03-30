@@ -21,9 +21,8 @@ impl Db {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
-                connection_id TEXT PRIMARY KEY,
-                client_id TEXT NOT NULL,
-                install_id TEXT NOT NULL,
+                install_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
                 build_uuid TEXT NOT NULL,
                 hostname TEXT NOT NULL,
                 username TEXT NOT NULL,
@@ -37,12 +36,11 @@ impl Db {
                 disconnected_at INTEGER
             );
 
-            CREATE INDEX IF NOT EXISTS idx_sessions_install_id ON sessions(install_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
             CREATE TABLE IF NOT EXISTS command_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                connection_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
                 install_id TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
                 ok INTEGER NOT NULL,
@@ -63,6 +61,15 @@ impl Db {
             );
 
             CREATE INDEX IF NOT EXISTS idx_chat_history_install_id ON chat_history(install_id);
+
+            CREATE TABLE IF NOT EXISTS conversations (
+                conversation_id TEXT PRIMARY KEY,
+                install_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conversations_install_id ON conversations(install_id);
             "#,
         )?;
         Ok(())
@@ -70,19 +77,20 @@ impl Db {
 
     pub fn upsert_session_online(
         &self,
+        install_id: &str,
+        session_id: &str,
         meta: &ClientMetadata,
         now_ts: u64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.conn.execute(
             r#"
             INSERT INTO sessions (
-                connection_id, client_id, install_id, build_uuid,
+                install_id, session_id, build_uuid,
                 hostname, username, pid, ip, os, arch,
                 status, connected_at, last_seen, disconnected_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'online', ?11, ?12, NULL)
-            ON CONFLICT(connection_id) DO UPDATE SET
-                client_id=excluded.client_id,
-                install_id=excluded.install_id,
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'online', ?10, ?11, NULL)
+            ON CONFLICT(install_id) DO UPDATE SET
+                session_id=excluded.session_id,
                 build_uuid=excluded.build_uuid,
                 hostname=excluded.hostname,
                 username=excluded.username,
@@ -95,9 +103,8 @@ impl Db {
                 disconnected_at=NULL
             "#,
             params![
-                meta.connection_id,
-                meta.client_id,
-                meta.install_id,
+                install_id,
+                session_id,
                 meta.build_uuid,
                 meta.hostname,
                 meta.username,
@@ -114,19 +121,19 @@ impl Db {
 
     pub fn mark_offline(
         &self,
-        connection_id: &str,
+        session_id: &str,
         now_ts: u64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.conn.execute(
-            "UPDATE sessions SET status='offline', disconnected_at=?2, last_seen=?2 WHERE connection_id=?1",
-            params![connection_id, now_ts],
+            "UPDATE sessions SET status='offline', disconnected_at=?2, last_seen=?2 WHERE session_id=?1",
+            params![session_id, now_ts],
         )?;
         Ok(())
     }
 
     pub fn insert_command_history(
         &self,
-        connection_id: &str,
+        session_id: &str,
         install_id: &str,
         tool_name: &str,
         ok: bool,
@@ -136,8 +143,8 @@ impl Db {
         now_ts: u64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.conn.execute(
-            "INSERT INTO command_history(connection_id, install_id, tool_name, ok, data_json, error, duration_ms, created_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![connection_id, install_id, tool_name, if ok {1} else {0}, data_json, error, duration_ms as i64, now_ts],
+            "INSERT INTO command_history(session_id, install_id, tool_name, ok, data_json, error, duration_ms, created_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![session_id, install_id, tool_name, if ok {1} else {0}, data_json, error, duration_ms as i64, now_ts],
         )?;
         Ok(())
     }
@@ -210,5 +217,33 @@ impl Db {
             params![install_id],
         )?;
         Ok(())
+    }
+
+    pub fn insert_conversation(
+        &self,
+        conversation_id: &str,
+        install_id: &str,
+        title: &str,
+        now_ts: u64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO conversations(conversation_id, install_id, title, created_at) VALUES(?1, ?2, ?3, ?4)",
+            params![conversation_id, install_id, title, now_ts],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_conversation_install_id(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT install_id FROM conversations WHERE conversation_id=?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![conversation_id])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(row.get::<_, String>(0)?));
+        }
+        Ok(None)
     }
 }

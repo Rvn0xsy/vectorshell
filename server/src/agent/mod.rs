@@ -1,6 +1,7 @@
 use crate::config::ServerConfig;
 use crate::agent::exec_tool::{ExecTool, ToolEventEmitter};
 use crate::agent::file_tools::{DownloadFileTool, ReadFileTool, UploadFileTool, WriteFileTool};
+use crate::agent::windows_tools::{DotnetAssemblyTool, PowerShellClrTool};
 use crate::ui::UiState;
 use rig::completion::Prompt;
 use rig::providers::openai;
@@ -10,6 +11,7 @@ use serde_json::Value;
 
 pub mod exec_tool;
 pub mod file_tools;
+pub mod windows_tools;
 
 #[derive(Clone)]
 pub struct Agent {
@@ -58,7 +60,7 @@ impl Agent {
         &self,
         task: &str,
         manager: Arc<Mutex<ClientManager>>,
-        client_id: &str,
+        session_id: &str,
         ui_state: Arc<Mutex<UiState>>,
         event_emitter: Option<ToolEventEmitter>,
     ) -> Result<String, anyhow::Error> {
@@ -78,32 +80,44 @@ impl Agent {
         let last_tool_output = Arc::new(Mutex::new(None));
         let exec_tool = ExecTool::new(
             Arc::clone(&manager),
-            client_id.to_string(),
+            session_id.to_string(),
             Arc::clone(&last_tool_output),
             ui_state,
             event_emitter.clone(),
         );
         let read_tool = ReadFileTool::new(
             Arc::clone(&manager),
-            client_id.to_string(),
+            session_id.to_string(),
             Arc::clone(&last_tool_output),
             event_emitter.clone(),
         );
         let write_tool = WriteFileTool::new(
             Arc::clone(&manager),
-            client_id.to_string(),
+            session_id.to_string(),
             Arc::clone(&last_tool_output),
             event_emitter.clone(),
         );
         let upload_tool = UploadFileTool::new(
             Arc::clone(&manager),
-            client_id.to_string(),
+            session_id.to_string(),
             Arc::clone(&last_tool_output),
             event_emitter.clone(),
         );
         let download_tool = DownloadFileTool::new(
             Arc::clone(&manager),
-            client_id.to_string(),
+            session_id.to_string(),
+            Arc::clone(&last_tool_output),
+            event_emitter.clone(),
+        );
+        let powershell_clr_tool = PowerShellClrTool::new(
+            Arc::clone(&manager),
+            session_id.to_string(),
+            Arc::clone(&last_tool_output),
+            event_emitter.clone(),
+        );
+        let dotnet_assembly_tool = DotnetAssemblyTool::new(
+            Arc::clone(&manager),
+            session_id.to_string(),
             Arc::clone(&last_tool_output),
             event_emitter.clone(),
         );
@@ -116,6 +130,8 @@ impl Agent {
             .tool(write_tool)
             .tool(upload_tool)
             .tool(download_tool)
+            .tool(powershell_clr_tool)
+            .tool(dotnet_assembly_tool)
             .build();
 
         let mut tool_outputs: Vec<serde_json::Value> = Vec::new();
@@ -214,9 +230,12 @@ fn default_identity_prompt() -> String {
         "- write_file(path,content): write text file on selected client.",
         "- upload_file(src,dst): upload server-local file src to client path dst.",
         "- download_file(src,dst): download client path src to server-local path dst.",
+        "- powershell_clr(script): run PowerShell via CLR host (Windows clients only).",
+        "- dotnet_assembly(content_base64|artifact_id,runtime_version,args,domain,patch_exit): run .NET EXE in-memory (Windows clients only).",
         "",
         "Tool usage policy:",
         "- Prefer file tools for file operations; use exec only when file tools are insufficient.",
+        "- Use windows-only tools ONLY when selected client capability includes them.",
         "- upload_file/download_file are directional; do not confuse src/dst sides.",
         "- read_file/write_file paths are on CLIENT side.",
         "",

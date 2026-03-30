@@ -76,13 +76,10 @@ where
     let (tx, mut rx) = mpsc::unbounded_channel::<ClientToServerMessage>();
 
     let install_id = load_or_create_install_id().await;
-    let connection_id = Uuid::new_v4().to_string();
-    let client_id = connection_id.clone();
     let (hostname, os, arch, ip, timestamp, username, pid) = collect_client_metadata();
     let register = ClientToServerMessage::Register {
         id: uuid_v4(),
         payload: RegisterMessage {
-            client_id: client_id.clone(),
             token: AUTH_TOKEN.to_string(),
             hostname,
             os,
@@ -92,13 +89,12 @@ where
             username,
             pid,
             build_uuid: BUILD_UUID.to_string(),
-            install_id,
-            connection_id: connection_id.clone(),
+            install_id: install_id.clone(),
             capabilities: capabilities(),
         },
     };
     tx.send(register).ok();
-    eprintln!("registered with server as {client_id}");
+    eprintln!("registered with server: install_id={install_id}");
 
     let writer: tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>> =
         tokio::spawn(async move {
@@ -110,7 +106,6 @@ where
         });
 
     let heartbeat_tx = tx.clone();
-    let heartbeat_client_id = client_id.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -118,7 +113,6 @@ where
             let heartbeat = ClientToServerMessage::Heartbeat {
                 id: uuid_v4(),
                 payload: HeartbeatMessage {
-                    client_id: heartbeat_client_id.clone(),
                     timestamp: unix_timestamp(),
                 },
             };
@@ -132,7 +126,7 @@ where
             let parsed: ServerToClientMessage = serde_json::from_str(&text)?;
             match parsed {
                 ServerToClientMessage::Exec { id, payload } => {
-                    let result = execute_command(&client_id, payload).await;
+                    let result = execute_command(payload).await;
                     let result_msg = ClientToServerMessage::Result {
                         id,
                         payload: result,
@@ -140,7 +134,7 @@ where
                     tx.send(result_msg).ok();
                 }
                 ServerToClientMessage::ToolCall { id, payload } => {
-                    let tool_result = execute_tool(&client_id, &payload).await;
+                    let tool_result = execute_tool(&payload).await;
 
                     if payload.tool_name == "exec" {
                         if let Ok(exec_result) = decode_tool_result_as_exec(&tool_result).await {
@@ -161,6 +155,9 @@ where
                 ServerToClientMessage::Ping { .. } => {}
                 ServerToClientMessage::Upload { .. } => {}
                 ServerToClientMessage::Download { .. } => {}
+                ServerToClientMessage::Registered { id: _, payload } => {
+                    eprintln!("server acknowledged registration: session_id={} install_id={}", payload.session_id, payload.install_id);
+                }
             }
         }
     }

@@ -9,13 +9,14 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::fs;
 
 const CHUNK_SIZE: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct ReadFileTool {
     manager: Arc<Mutex<ClientManager>>,
-    client_id: String,
+    session_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
     event_emitter: Option<ToolEventEmitter>,
 }
@@ -23,7 +24,7 @@ pub struct ReadFileTool {
 #[derive(Clone)]
 pub struct WriteFileTool {
     manager: Arc<Mutex<ClientManager>>,
-    client_id: String,
+    session_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
     event_emitter: Option<ToolEventEmitter>,
 }
@@ -31,7 +32,7 @@ pub struct WriteFileTool {
 #[derive(Clone)]
 pub struct UploadFileTool {
     manager: Arc<Mutex<ClientManager>>,
-    client_id: String,
+    session_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
     event_emitter: Option<ToolEventEmitter>,
 }
@@ -39,7 +40,7 @@ pub struct UploadFileTool {
 #[derive(Clone)]
 pub struct DownloadFileTool {
     manager: Arc<Mutex<ClientManager>>,
-    client_id: String,
+    session_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
     event_emitter: Option<ToolEventEmitter>,
 }
@@ -47,13 +48,13 @@ pub struct DownloadFileTool {
 impl ReadFileTool {
     pub fn new(
         manager: Arc<Mutex<ClientManager>>,
-        client_id: String,
+        session_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
         event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
-            client_id,
+            session_id,
             last_output,
             event_emitter,
         }
@@ -63,13 +64,13 @@ impl ReadFileTool {
 impl WriteFileTool {
     pub fn new(
         manager: Arc<Mutex<ClientManager>>,
-        client_id: String,
+        session_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
         event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
-            client_id,
+            session_id,
             last_output,
             event_emitter,
         }
@@ -79,13 +80,13 @@ impl WriteFileTool {
 impl UploadFileTool {
     pub fn new(
         manager: Arc<Mutex<ClientManager>>,
-        client_id: String,
+        session_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
         event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
-            client_id,
+            session_id,
             last_output,
             event_emitter,
         }
@@ -95,13 +96,13 @@ impl UploadFileTool {
 impl DownloadFileTool {
     pub fn new(
         manager: Arc<Mutex<ClientManager>>,
-        client_id: String,
+        session_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
         event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
-            client_id,
+            session_id,
             last_output,
             event_emitter,
         }
@@ -166,7 +167,7 @@ impl Tool for ReadFileTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         call_remote_tool(
             Arc::clone(&self.manager),
-            &self.client_id,
+            &self.session_id,
             "read_file",
             serde_json::to_value(args.clone()).map_err(|e| FileToolError(e.to_string()))?,
             Arc::clone(&self.last_output),
@@ -201,7 +202,7 @@ impl Tool for WriteFileTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         call_remote_tool(
             Arc::clone(&self.manager),
-            &self.client_id,
+            &self.session_id,
             "write_file",
             serde_json::to_value(args.clone()).map_err(|e| FileToolError(e.to_string()))?,
             Arc::clone(&self.last_output),
@@ -234,7 +235,8 @@ impl Tool for UploadFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let bytes = std::fs::read(&args.src)
+        let bytes = fs::read(&args.src)
+            .await
             .map_err(|e| FileToolError(format!("read server src failed: {e}")))?;
         let chunks = bytes
             .chunks(CHUNK_SIZE)
@@ -250,7 +252,7 @@ impl Tool for UploadFileTool {
             });
             call_remote_tool(
                 Arc::clone(&self.manager),
-                &self.client_id,
+                &self.session_id,
                 "upload_file",
                 payload,
                 Arc::clone(&self.last_output),
@@ -307,7 +309,7 @@ impl Tool for DownloadFileTool {
             };
             let response = call_remote_tool(
                 Arc::clone(&self.manager),
-                &self.client_id,
+                &self.session_id,
                 "download_file_chunk",
                 serde_json::to_value(payload).map_err(|e| FileToolError(e.to_string()))?,
                 Arc::clone(&self.last_output),
@@ -347,10 +349,12 @@ impl Tool for DownloadFileTool {
         }
 
         if let Some(parent) = Path::new(&args.dst).parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
+                .await
                 .map_err(|e| FileToolError(format!("create dst parent failed: {e}")))?;
         }
-        std::fs::write(&args.dst, &bytes)
+        fs::write(&args.dst, &bytes)
+            .await
             .map_err(|e| FileToolError(format!("write dst failed: {e}")))?;
 
         let output = json!({
@@ -369,18 +373,19 @@ impl Tool for DownloadFileTool {
 
 async fn call_remote_tool(
     manager: Arc<Mutex<ClientManager>>,
-    client_id: &str,
+    session_id: &str,
     tool_name: &str,
     args: Value,
     last_output: Arc<Mutex<Option<Value>>>,
     event_emitter: Option<ToolEventEmitter>,
 ) -> Result<Value, FileToolError> {
+    let safe_args = sanitize_tool_value(&args);
     let receiver = {
         let mut mgr = manager
             .lock()
             .map_err(|_| FileToolError("client manager lock failed".to_string()))?;
         let (request_id, receiver) = mgr
-            .dispatch_tool_call(client_id, tool_name, args.clone(), Some(60_000))
+            .dispatch_tool_call(session_id, tool_name, args.clone(), Some(60_000))
             .map_err(FileToolError)?;
 
         if let Some(emitter) = &event_emitter {
@@ -389,7 +394,7 @@ async fn call_remote_tool(
                 "timestamp": chrono::Utc::now().to_rfc3339(),
                 "request_id": request_id,
                 "tool_name": tool_name,
-                "args": args.clone(),
+                "args": safe_args.clone(),
             }));
         }
         receiver
@@ -418,11 +423,37 @@ async fn call_remote_tool(
 
     let capture = json!({
         "tool": tool_name,
-        "args": args,
+        "args": safe_args,
         "result": result.data,
     });
     if let Ok(mut guard) = last_output.lock() {
         *guard = Some(capture.clone());
     }
     Ok(capture)
+}
+
+fn sanitize_tool_value(value: &Value) -> Value {
+    match value {
+        Value::String(s) => {
+            if s.len() > 240 {
+                Value::String(format!("{}...[truncated:{}]", &s[..240], s.len()))
+            } else {
+                Value::String(s.clone())
+            }
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sanitize_tool_value).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if k == "content_base64" {
+                    let len = v.as_str().map(|s| s.len()).unwrap_or(0);
+                    out.insert(k.clone(), Value::String(format!("<base64:{} chars>", len)));
+                } else {
+                    out.insert(k.clone(), sanitize_tool_value(v));
+                }
+            }
+            Value::Object(out)
+        }
+        _ => value.clone(),
+    }
 }

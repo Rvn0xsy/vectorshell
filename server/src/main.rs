@@ -67,9 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config: config.clone(),
         api_auth_token: config.auth.api_token.clone(),
         client_auth_token: config.auth.client_token.clone(),
-        events: Arc::clone(&events),
+        events: events.clone(),
         ui_state: Arc::clone(&ui_state),
-        conversations: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let listen_addr = config.server.listen.clone();
@@ -219,8 +218,8 @@ async fn run_repl(
                         &ui_state,
                         "Info",
                         &format!(
-                            "- conn={} host={} user={} pid={} ip={} build={}",
-                            client.connection_id,
+                            "- session={} host={} user={} pid={} ip={} build={}",
+                            client.session_id,
                             client.hostname,
                             client.username,
                             client.pid,
@@ -241,8 +240,8 @@ async fn run_repl(
                             &ui_state,
                             "Info",
                             &format!(
-                                "connection_id={} hostname={} user={} pid={} ip={} os={} arch={} build_uuid={} install_id={} last_heartbeat={}",
-                                meta.connection_id,
+                                "session_id={} hostname={} user={} pid={} ip={} os={} arch={} build_uuid={} install_id={} last_heartbeat={}",
+                                meta.session_id,
                                 meta.hostname,
                                 meta.username,
                                 meta.pid,
@@ -288,16 +287,13 @@ async fn run_repl(
             let mapped = manager
                 .lock()
                 .ok()
-                .and_then(|mgr| {
-                    mgr.get_by_connection_id(wanted)
-                        .or_else(|| mgr.get_client_metadata(wanted))
-                })
-                .map(|m| m.client_id);
-            if let Some(client_id) = mapped {
-                selected_client = Some(client_id.clone());
+                .and_then(|mgr| mgr.get_by_install_id(wanted))
+                .map(|m| m.session_id);
+            if let Some(session_id) = mapped {
+                selected_client = Some(session_id.clone());
                 agent_mode = true;
                 context.clear();
-                tracing::info!(client_id = %client_id, "selected client");
+                tracing::info!(session_id = %session_id, "selected client");
                 ui_print(&ui_state, "Info", &format!("selected client: {}", wanted));
             } else {
                 ui_print(&ui_state, "Error", "client not found (use /sessions)");
@@ -540,8 +536,7 @@ fn build_agent_prompt(
         if let Ok(mgr) = manager.lock() {
             if let Some(metadata) = mgr.get_client_metadata(client_id) {
                 prompt.push_str("Client Info:\n");
-                prompt.push_str(&format!("client_id: {}\n", metadata.client_id));
-                prompt.push_str(&format!("connection_id: {}\n", metadata.connection_id));
+                prompt.push_str(&format!("session_id: {}\n", metadata.session_id));
                 prompt.push_str(&format!("install_id: {}\n", metadata.install_id));
                 prompt.push_str(&format!("build_uuid: {}\n", metadata.build_uuid));
                 prompt.push_str(&format!("hostname: {}\n", metadata.hostname));

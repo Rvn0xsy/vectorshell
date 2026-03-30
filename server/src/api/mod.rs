@@ -4,7 +4,7 @@ use crate::builder::generate_client_binary;
 use crate::client_manager::{ClientManager, ClientMetadata, ExecHistoryEntry};
 use crate::config::{ServerConfig, TlsSection};
 use crate::db::Db;
-use crate::event_bus::{EventBus, emit as emit_bus, ensure_channel};
+use crate::event_bus::EventBus;
 use crate::ui::{UiState, ui_print};
 use axum_server::tls_rustls::RustlsConfig;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use shared::protocol::{ClientToServerMessage, ServerToClientMessage};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
@@ -43,7 +42,6 @@ pub struct ApiState {
     pub client_auth_token: String,
     pub events: EventBus,
     pub ui_state: Arc<Mutex<UiState>>,
-    pub conversations: Arc<Mutex<HashMap<String, String>>>, // conversation_id -> connection_id
 }
 
 pub async fn run_api_server(
@@ -56,11 +54,11 @@ pub async fn run_api_server(
         .route(ws_path.as_str(), get(websocket_upgrade))
         .route("/api/health", get(health))
         .route("/api/sessions", get(list_sessions))
-        .route("/api/sessions/:connection_id", get(get_session))
-        .route("/api/sessions/:connection_id/history", get(get_session_history))
-        .route("/api/sessions/:connection_id/clean", post(clean_session))
-        .route("/api/sessions/:connection_id/events", get(session_events))
-        .route("/api/sessions/:connection_id/tools", post(call_tool))
+        .route("/api/sessions/:install_id", get(get_session))
+        .route("/api/sessions/:install_id/history", get(get_session_history))
+        .route("/api/sessions/:install_id/clean", post(clean_session))
+        .route("/api/sessions/:install_id/events", get(session_events))
+        .route("/api/sessions/:install_id/tools", post(call_tool))
         .route("/api/conversations", post(create_conversation))
         .route(
             "/api/conversations/:conversation_id/messages",
@@ -147,7 +145,7 @@ async fn handle_ws_socket(
     state: ApiState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerToClientMessage>();
-    let mut active_connection_id: Option<String> = None;
+    let mut active_session_id: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -181,16 +179,16 @@ async fn handle_ws_socket(
                 if let WsMessage::Text(text) = msg {
                     let parsed: ClientToServerMessage = serde_json::from_str(text.as_str())?;
                     match parsed {
-                        ClientToServerMessage::Register { id: _, payload } => {
+                        ClientToServerMessage::Register { id, payload } => {
                             if payload.token != state.client_auth_token {
-                                tracing::warn!(client_id = %payload.client_id, "authentication failed");
+                                tracing::warn!(install_id = %payload.install_id, "authentication failed");
                                 continue;
                             }
-                            tracing::info!(client_id = %payload.client_id, "client registered");
+                            let session_id = ClientManager::generate_session_id();
+                            tracing::info!(session_id = %session_id, install_id = %payload.install_id, "client registered");
                             let metadata = ClientMetadata::new(
-                                payload.client_id.clone(),
-                                payload.connection_id.clone(),
-                                payload.install_id,
+                                payload.install_id.clone(),
+                                session_id.clone(),
                                 payload.build_uuid,
                                 payload.hostname,
                                 payload.username,
@@ -202,31 +200,31 @@ async fn handle_ws_socket(
                                 payload.capabilities,
                             );
                             if let Ok(mut mgr) = state.manager.lock() {
-                                mgr.register(payload.client_id, tx.clone(), metadata);
+                                mgr.register(session_id.clone(), tx.clone(), metadata.clone());
+                                // Send Registered ack to client
+                                ClientManager::send_registered(&tx, &id, &session_id, &payload.install_id);
                             }
-                            active_connection_id = Some(payload.connection_id);
-                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
-                                active_connection_id.clone(),
+                            active_session_id = Some(session_id);
+                            if let (Some(session_id), Ok(mgr), Ok(db)) = (
+                                active_session_id.clone(),
                                 state.manager.lock(),
                                 state.db.lock(),
                             ) {
-                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
-                                    let _ = db.upsert_session_online(&meta, unix_timestamp());
+                                if let Some(meta) = mgr.get_by_session_id(&session_id) {
+                                    let _ = db.upsert_session_online(&meta.install_id, &session_id, &meta, unix_timestamp());
                                 }
                             }
                         }
                         ClientToServerMessage::Heartbeat { id: _, payload } => {
-                            tracing::debug!(client_id = %payload.client_id, "heartbeat");
-                            if let Ok(mut mgr) = state.manager.lock() {
-                                mgr.update_heartbeat(&payload.client_id, payload.timestamp);
-                            }
-                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
-                                active_connection_id.clone(),
+                            tracing::debug!(session_id = ?active_session_id, "heartbeat");
+                            if let (Some(session_id), Ok(mut mgr), Ok(db)) = (
+                                active_session_id.clone(),
                                 state.manager.lock(),
                                 state.db.lock(),
                             ) {
-                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
-                                    let _ = db.upsert_session_online(&meta, unix_timestamp());
+                                mgr.update_heartbeat(&session_id, payload.timestamp);
+                                if let Some(meta) = mgr.get_by_session_id(&session_id) {
+                                    let _ = db.upsert_session_online(&meta.install_id, &session_id, &meta, unix_timestamp());
                                 }
                             }
                         }
@@ -249,11 +247,10 @@ async fn handle_ws_socket(
                                 &state.ui_state,
                                 "Result",
                                 &format!(
-                                    "exit_code={} duration_ms={} cwd={} client_id={} command={}",
+                                    "exit_code={} duration_ms={} cwd={} command={}",
                                     payload.exit_code,
                                     payload.duration_ms,
                                     payload.cwd,
-                                    payload.client_id,
                                     payload.command
                                 ),
                             );
@@ -266,10 +263,9 @@ async fn handle_ws_socket(
                                 ui_print(&state.ui_state, "Result", &format!("stderr: {}", payload.stderr));
                             }
 
-                            if let Some(connection_id) = active_connection_id.clone() {
-                                emit_bus(
-                                    &state.events,
-                                    &connection_id,
+                            if let Some(session_id) = active_session_id.clone() {
+                                state.events.emit(
+                                    &session_id,
                                     serde_json::json!({
                                         "event": "exec.result",
                                         "conversation_id": "",
@@ -282,27 +278,29 @@ async fn handle_ws_socket(
                                     }),
                                 );
                             }
-                            if let Ok(mut mgr) = state.manager.lock() {
-                                mgr.record_exec_result(
-                                    &payload.client_id,
-                                    &id,
-                                    ExecHistoryEntry {
-                                        command: command_clone,
-                                        stdout: stdout_clone,
-                                        stderr: stderr_clone,
-                                        exit_code: payload.exit_code,
-                                        duration_ms: payload.duration_ms,
-                                        cwd: cwd_clone,
-                                        env: env_clone,
-                                    },
-                                );
+                            if let Some(session_id) = active_session_id.clone() {
+                                if let Ok(mut mgr) = state.manager.lock() {
+                                    mgr.record_exec_result(
+                                        &session_id,
+                                        &id,
+                                        ExecHistoryEntry {
+                                            command: command_clone,
+                                            stdout: stdout_clone,
+                                            stderr: stderr_clone,
+                                            exit_code: payload.exit_code,
+                                            duration_ms: payload.duration_ms,
+                                            cwd: cwd_clone,
+                                            env: env_clone,
+                                        },
+                                    );
+                                }
                             }
-                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
-                                active_connection_id.clone(),
+                            if let (Some(session_id), Ok(mgr), Ok(db)) = (
+                                active_session_id.clone(),
                                 state.manager.lock(),
                                 state.db.lock(),
                             ) {
-                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
+                                if let Some(meta) = mgr.get_by_session_id(&session_id) {
                                     let data_json = serde_json::to_string(&serde_json::json!({
                                         "command": payload.command,
                                         "stdout": payload.stdout,
@@ -313,7 +311,7 @@ async fn handle_ws_socket(
                                     }))
                                     .unwrap_or_else(|_| "{}".to_string());
                                     let _ = db.insert_command_history(
-                                        &meta.connection_id,
+                                        &session_id,
                                         &meta.install_id,
                                         "exec",
                                         true,
@@ -326,14 +324,12 @@ async fn handle_ws_socket(
                             }
                         }
                         ClientToServerMessage::ToolResult { id, payload } => {
-                            if let Ok(mut mgr) = state.manager.lock() {
-                                mgr.record_tool_result(&id, payload.clone());
-                            }
-
-                            if let Some(connection_id) = active_connection_id.clone() {
-                                emit_bus(
-                                    &state.events,
-                                    &connection_id,
+                            if let Some(session_id) = active_session_id.clone() {
+                                if let Ok(mut mgr) = state.manager.lock() {
+                                    mgr.record_tool_result(&id, payload.clone());
+                                }
+                                state.events.emit(
+                                    &session_id,
                                     serde_json::json!({
                                         "event": "tool.result",
                                         "conversation_id": "",
@@ -347,16 +343,16 @@ async fn handle_ws_socket(
                                     }),
                                 );
                             }
-                            if let (Some(connection_id), Ok(mgr), Ok(db)) = (
-                                active_connection_id.clone(),
+                            if let (Some(session_id), Ok(mgr), Ok(db)) = (
+                                active_session_id.clone(),
                                 state.manager.lock(),
                                 state.db.lock(),
                             ) {
-                                if let Some(meta) = mgr.get_by_connection_id(&connection_id) {
+                                if let Some(meta) = mgr.get_by_session_id(&session_id) {
                                     let data_json = serde_json::to_string(&payload.data)
                                         .unwrap_or_else(|_| "null".to_string());
                                     let _ = db.insert_command_history(
-                                        &meta.connection_id,
+                                        &session_id,
                                         &meta.install_id,
                                         &payload.tool_name,
                                         payload.ok,
@@ -374,9 +370,13 @@ async fn handle_ws_socket(
         }
     }
 
-    if let Some(connection_id) = active_connection_id {
-        if let Ok(db) = state.db.lock() {
-            let _ = db.mark_offline(&connection_id, unix_timestamp());
+    if let Some(session_id) = active_session_id {
+        if let Ok(mgr) = state.manager.lock() {
+            if let Some(_meta) = mgr.get_by_session_id(&session_id) {
+                if let Ok(db) = state.db.lock() {
+                    let _ = db.mark_offline(&session_id, unix_timestamp());
+                }
+            }
         }
     }
 
@@ -399,14 +399,14 @@ async fn list_sessions(
 async fn get_session(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Path(connection_id): Path<String>,
+    Path(install_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     auth(&headers, &state)?;
     let found = state
         .manager
         .lock()
         .ok()
-        .and_then(|m| m.get_by_connection_id(&connection_id));
+        .and_then(|m| m.get_by_install_id(&install_id));
 
     if let Some(meta) = found {
         Ok(Json(json!(meta)))
@@ -425,30 +425,14 @@ async fn get_session(
 async fn get_session_history(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Path(connection_id): Path<String>,
+    Path(install_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     auth(&headers, &state)?;
-    let meta = state
-        .manager
-        .lock()
-        .ok()
-        .and_then(|m| m.get_by_connection_id(&connection_id))
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: "not_found".to_string(),
-                    message: "session not found".to_string(),
-                }),
-            )
-                .into_response()
-        })?;
-
     let history = state
         .db
         .lock()
         .map_err(|_| internal("db lock failed"))?
-        .read_chat_history(&meta.install_id, 500)
+        .read_chat_history(&install_id, 500)
         .map_err(|e| internal(&e.to_string()))?;
 
     let messages = history
@@ -463,8 +447,7 @@ async fn get_session_history(
         .collect::<Vec<_>>();
 
     Ok(Json(json!({
-        "connection_id": connection_id,
-        "install_id": meta.install_id,
+        "install_id": install_id,
         "messages": messages,
     })))
 }
@@ -472,26 +455,11 @@ async fn get_session_history(
 async fn clean_session(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Path(connection_id): Path<String>,
+    Path(install_id): Path<String>,
 ) -> Result<Json<Value>, Response> {
     auth(&headers, &state)?;
-    let meta = state
-        .manager
-        .lock()
-        .ok()
-        .and_then(|m| m.get_by_connection_id(&connection_id));
-    let Some(meta) = meta else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: "not_found".to_string(),
-                message: "session not found".to_string(),
-            }),
-        )
-            .into_response());
-    };
     if let Ok(db) = state.db.lock() {
-        let _ = db.clear_install_history(&meta.install_id);
+        let _ = db.clear_install_history(&install_id);
     }
     Ok(Json(json!({ "ok": true, "message": "current history cleared" })))
 }
@@ -506,7 +474,7 @@ struct ToolCallReq {
 async fn call_tool(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Path(connection_id): Path<String>,
+    Path(install_id): Path<String>,
     Json(req): Json<ToolCallReq>,
 ) -> Result<Json<Value>, Response> {
     auth(&headers, &state)?;
@@ -514,7 +482,7 @@ async fn call_tool(
         .manager
         .lock()
         .ok()
-        .and_then(|m| m.get_by_connection_id(&connection_id));
+        .and_then(|m| m.get_by_install_id(&install_id));
     let Some(meta) = meta else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -532,18 +500,56 @@ async fn call_tool(
     if req.tool_name == "download_file" {
         return handle_download_pathref(state, meta, req).await;
     }
-
     let original_args = req.args.clone();
-    let tool_args = resolve_pathref_args(&req.tool_name, req.args).await.map_err(|e| {
-        (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ErrorBody {
-                error: "invalid_path_ref".to_string(),
-                message: e,
-            }),
-        )
-            .into_response()
-    })?;
+    let tool_args = if req.tool_name == "dotnet_assembly" {
+        let mut normalized = req.args.clone();
+        let has_content = normalized
+            .get("content_base64")
+            .and_then(Value::as_str)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_content {
+            let artifact_id = normalized
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(ErrorBody {
+                            error: "invalid_path_ref".to_string(),
+                            message: "dotnet_assembly requires content_base64 or artifact_id"
+                                .to_string(),
+                        }),
+                    )
+                        .into_response()
+                })?;
+            let bytes = fs::read(artifact_path(artifact_id)).map_err(|e| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: "artifact_error".to_string(),
+                        message: format!("read artifact failed: {e}"),
+                    }),
+                )
+                    .into_response()
+            })?;
+            normalized["content_base64"] =
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+        normalized
+    } else {
+        resolve_pathref_args(&req.tool_name, req.args).await.map_err(|e| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorBody {
+                    error: "invalid_path_ref".to_string(),
+                    message: e,
+                }),
+            )
+                .into_response()
+        })?
+    };
 
     let dispatch_args = tool_args.clone();
     let receiver = {
@@ -558,7 +564,7 @@ async fn call_tool(
                 .into_response()
         })?;
         match mgr.dispatch_tool_call(
-            &meta.client_id,
+            &meta.session_id,
             &req.tool_name,
             dispatch_args,
             req.timeout_ms.or(Some(120_000)),
@@ -566,7 +572,7 @@ async fn call_tool(
             Ok((request_id, rx)) => {
                 emit_event(
                     &state,
-                    &meta.connection_id,
+                    &meta.session_id,
                     json!({
                         "event": "tool.started",
                         "conversation_id": "",
@@ -658,7 +664,7 @@ async fn call_tool(
                 });
                 emit_event(
                     &state,
-                    &meta.connection_id,
+                    &meta.session_id,
                     json!({
                         "event": "tool.finished",
                         "conversation_id": "",
@@ -682,7 +688,7 @@ async fn call_tool(
     });
     emit_event(
         &state,
-        &meta.connection_id,
+        &meta.session_id,
         json!({
             "event": "tool.finished",
             "conversation_id": "",
@@ -732,7 +738,7 @@ async fn handle_upload_pathref(
 
     emit_event(
         &state,
-        &meta.connection_id,
+        &meta.session_id,
         json!({"event":"tool.started","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"upload_file"}),
     );
 
@@ -749,7 +755,7 @@ async fn handle_upload_pathref(
                 .map_err(|_| internal("manager lock failed"))?;
             let (_, rx) = mgr
                 .dispatch_tool_call(
-                    &meta.client_id,
+                    &meta.session_id,
                     "upload_file",
                     payload,
                     Some(timeout.as_millis() as u64),
@@ -766,14 +772,14 @@ async fn handle_upload_pathref(
         }
         emit_event(
             &state,
-            &meta.connection_id,
+            &meta.session_id,
             json!({"event":"tool.progress","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"upload_file","percent":(((idx+1) as f64 / chunks.len() as f64) * 100.0)}),
         );
     }
 
     emit_event(
         &state,
-        &meta.connection_id,
+        &meta.session_id,
         json!({"event":"tool.finished","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"upload_file","ok":true,"duration_ms":0}),
     );
 
@@ -822,7 +828,7 @@ async fn handle_download_pathref(
 
     emit_event(
         &state,
-        &meta.connection_id,
+        &meta.session_id,
         json!({"event":"tool.started","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"download_file"}),
     );
 
@@ -835,7 +841,7 @@ async fn handle_download_pathref(
                 .map_err(|_| internal("manager lock failed"))?;
             let (_, rx) = mgr
                 .dispatch_tool_call(
-                    &meta.client_id,
+                    &meta.session_id,
                     "download_file_chunk",
                     payload,
                     Some(timeout.as_millis() as u64),
@@ -879,7 +885,7 @@ async fn handle_download_pathref(
 
         emit_event(
             &state,
-            &meta.connection_id,
+            &meta.session_id,
             json!({"event":"tool.progress","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"download_file","detail":format!("bytes={}", offset)}),
         );
 
@@ -892,7 +898,7 @@ async fn handle_download_pathref(
         let artifact_id = save_artifact_raw_bytes(&all).map_err(|e| internal(&e))?;
         emit_event(
             &state,
-            &meta.connection_id,
+            &meta.session_id,
             json!({"event":"tool.finished","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"download_file","ok":true,"duration_ms":0}),
         );
         return Ok(Json(json!({
@@ -912,7 +918,7 @@ async fn handle_download_pathref(
 
     emit_event(
         &state,
-        &meta.connection_id,
+        &meta.session_id,
         json!({"event":"tool.finished","conversation_id":"","timestamp":now_rfc3339(),"tool_name":"download_file","ok":true,"duration_ms":0}),
     );
     Ok(Json(json!({
@@ -926,7 +932,7 @@ async fn handle_download_pathref(
 
 #[derive(Debug, Deserialize)]
 struct CreateConversationReq {
-    connection_id: String,
+    install_id: String,
     title: Option<String>,
 }
 
@@ -936,13 +942,12 @@ async fn create_conversation(
     Json(req): Json<CreateConversationReq>,
 ) -> Result<(StatusCode, Json<Value>), Response> {
     auth(&headers, &state)?;
-    let exists = state
+    let meta = state
         .manager
         .lock()
         .ok()
-        .and_then(|m| m.get_by_connection_id(&req.connection_id))
-        .is_some();
-    if !exists {
+        .and_then(|m| m.get_by_install_id(&req.install_id));
+    let Some(meta) = meta else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -951,20 +956,24 @@ async fn create_conversation(
             }),
         )
             .into_response());
-    }
+    };
 
     let conversation_id = format!("conv_{}", Uuid::new_v4().simple());
-    if let Ok(mut map) = state.conversations.lock() {
-        map.insert(conversation_id.clone(), req.connection_id.clone());
-    }
 
-    ensure_event_channel(&state, &conversation_id);
+    if let Ok(db) = state.db.lock() {
+        let _ = db.insert_conversation(
+            &conversation_id,
+            &meta.install_id,
+            req.title.as_deref().unwrap_or("conversation"),
+            unix_timestamp(),
+        );
+    }
 
     Ok((
         StatusCode::CREATED,
         Json(json!({
             "conversation_id": conversation_id,
-            "connection_id": req.connection_id,
+            "install_id": meta.install_id,
             "title": req.title.unwrap_or_else(|| "conversation".to_string()),
             "created_at": now_rfc3339(),
         })),
@@ -983,11 +992,13 @@ async fn conversation_message(
     Json(req): Json<ConversationMessageReq>,
 ) -> Result<(StatusCode, Json<Value>), Response> {
     auth(&headers, &state)?;
-    let connection_id = state
-        .conversations
+
+    // Resolve install_id from conversation_id (DB lookup)
+    let install_id = state
+        .db
         .lock()
         .ok()
-        .and_then(|m| m.get(&conversation_id).cloned())
+        .and_then(|db| db.get_conversation_install_id(&conversation_id).ok().flatten())
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -999,45 +1010,71 @@ async fn conversation_message(
                 .into_response()
         })?;
 
-    let client_id = state
+    // Get current active session for this install
+    let meta = state
         .manager
         .lock()
         .ok()
-        .and_then(|m| m.get_by_connection_id(&connection_id))
-        .map(|m| m.client_id)
+        .and_then(|m| m.get_by_install_id(&install_id))
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
                     error: "not_found".to_string(),
-                    message: "session not found".to_string(),
+                    message: "session offline".to_string(),
                 }),
             )
                 .into_response()
         })?;
 
+    let session_id = meta.session_id.clone();
+    let assistant_install_id = install_id.clone();
+
+    if let Ok(db) = state.db.lock() {
+        let _ = db.insert_chat(&install_id, "user", &req.message, unix_timestamp());
+    }
+
+    let history_context = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|db| db.read_recent_chat(&install_id, 12).ok())
+        .unwrap_or_default();
+
+    let mut contextual_prompt = String::new();
+    if !history_context.is_empty() {
+        contextual_prompt.push_str("Recent conversation context:\n");
+        for (role, content) in history_context {
+            contextual_prompt.push_str(&format!("{}: {}\n", role, content));
+        }
+        contextual_prompt.push_str("\nCurrent user message:\n");
+    }
+    contextual_prompt.push_str(&req.message);
+
     let manager = Arc::clone(&state.manager);
     let agent = Arc::clone(&state.agent);
+    let db = Arc::clone(&state.db);
     let events_state = state.clone();
     let conv = conversation_id.clone();
-    let user_message = req.message.clone();
+    let user_message = contextual_prompt;
 
     tokio::spawn(async move {
         let conv_for_tools = conv.clone();
         let event_state_for_tools = events_state.clone();
+        let session_id_for_emitter = session_id.clone();
         let emitter: ToolEventEmitter = Arc::new(move |mut payload: Value| {
             payload["conversation_id"] = Value::String(conv_for_tools.clone());
-            emit_event(&event_state_for_tools, &conv_for_tools, payload);
+            emit_event(&event_state_for_tools, &session_id_for_emitter, payload);
         });
 
         emit_event(
             &events_state,
-            &conv,
+            &session_id,
             json!({
                 "event": "conversation.started",
-                "conversation_id": conv,
+                "conversation_id": conv.clone(),
                 "timestamp": now_rfc3339(),
-                "connection_id": connection_id,
+                "session_id": session_id,
             }),
         );
 
@@ -1045,19 +1082,22 @@ async fn conversation_message(
             .respond_with_tools(
                 &user_message,
                 manager,
-                &client_id,
+                &session_id,
                 Arc::new(Mutex::new(crate::ui::UiState::default())),
                 Some(emitter),
             )
             .await
         {
             Ok(answer) => {
+                if let Ok(db) = db.lock() {
+                    let _ = db.insert_chat(&assistant_install_id, "assistant", &answer, unix_timestamp());
+                }
                 emit_event(
                     &events_state,
-                    &conv,
+                    &session_id,
                     json!({
                         "event": "agent.message",
-                        "conversation_id": conv,
+                        "conversation_id": conv.clone(),
                         "timestamp": now_rfc3339(),
                         "role": "assistant",
                         "content": answer,
@@ -1066,19 +1106,25 @@ async fn conversation_message(
                 );
                 emit_event(
                     &events_state,
-                    &conv,
+                    &session_id,
                     json!({
                         "event": "conversation.finished",
-                        "conversation_id": conv,
+                        "conversation_id": conv.clone(),
                         "timestamp": now_rfc3339(),
                         "ok": true,
                     }),
                 );
             }
             Err(error) => {
+                tracing::error!(
+                    conversation_id = %conv,
+                    session_id = %session_id,
+                    error = %error,
+                    "conversation agent execution failed"
+                );
                 emit_event(
                     &events_state,
-                    &conv,
+                    &session_id,
                     json!({
                         "event": "error",
                         "conversation_id": conv,
@@ -1140,7 +1186,7 @@ async fn conversation_events(
 async fn session_events(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Path(connection_id): Path<String>,
+    Path(install_id): Path<String>,
     Query(query): Query<SseQuery>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, Response> {
     let authorized = if headers.contains_key("authorization") {
@@ -1159,7 +1205,24 @@ async fn session_events(
             .into_response());
     }
 
-    let tx = ensure_event_channel(&state, &connection_id);
+    let session_id = state
+        .manager
+        .lock()
+        .ok()
+        .and_then(|m| m.get_by_install_id(&install_id))
+        .map(|meta| meta.session_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: "not_found".to_string(),
+                    message: "session not found".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let tx = ensure_event_channel(&state, &session_id);
     let rx = tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|item| match item {
         Ok(payload) => Some(Ok(Event::default().data(payload.to_string()))),
@@ -1633,11 +1696,11 @@ async fn save_artifact_from_file(path: &str) -> Result<String, String> {
 }
 
 fn ensure_event_channel(state: &ApiState, conversation_id: &str) -> broadcast::Sender<Value> {
-    ensure_channel(&state.events, conversation_id)
+    state.events.ensure_channel(conversation_id)
 }
 
 fn emit_event(state: &ApiState, conversation_id: &str, payload: Value) {
-    emit_bus(&state.events, conversation_id, payload);
+    state.events.emit(conversation_id, payload);
 }
 
 fn now_rfc3339() -> String {

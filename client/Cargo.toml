@@ -17,5 +17,6 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
+rustclr = "0.3.4"
 winreg = "0.52"
 windows-sys = { version = "0.61", features = ["Win32_Networking_WinHttp", "Win32_Foundation"] }

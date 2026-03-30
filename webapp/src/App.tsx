@@ -4,7 +4,8 @@ import remarkGfm from 'remark-gfm'
 import './App.css'
 
 type Session = {
-  connection_id: string
+  install_id: string
+  session_id: string
   hostname: string
   username: string
   pid: number
@@ -17,6 +18,8 @@ type ChatItem =
   | { kind: 'exec'; command: string; stdout?: string; stderr?: string; cwd?: string; env?: [string, string][]; exitCode?: number; durationMs?: number; ts: string }
   | { kind: 'system'; text: string; ts: string }
 
+type StreamStatus = 'connected' | 'reconnecting' | 'disconnected'
+
 const HELP_TEXT = [
   '/help - show help',
   '/exec <command> - execute remote command',
@@ -25,8 +28,58 @@ const HELP_TEXT = [
   '/clean - clear install_id history on server',
 ].join('\n')
 
+/** Exponential backoff with jitter: 1s, 2s, 4s, ... cap at 30s */
+function reconnectDelay(attempt: number): number {
+  const base = Math.min(1000 * Math.pow(2, attempt), 30_000)
+  const jitter = Math.random() * 500
+  return Math.floor(base + jitter)
+}
+
 function now() {
   return new Date().toLocaleTimeString()
+}
+
+const MAX_SESSION_CACHE_SIZE = 10
+
+/** Adds a new entry to sessionCache, evicting oldest if over limit. */
+function cacheWithLimit<T extends Record<string, { conversationId: string; chat: ChatItem[] }>>(
+  prev: T,
+  key: string,
+  value: { conversationId: string; chat: ChatItem[] }
+): T {
+  const next = { ...prev, [key]: value }
+  const keys = Object.keys(next)
+  if (keys.length > MAX_SESSION_CACHE_SIZE) {
+    // Remove the oldest key (first one in insertion order)
+    const oldest = keys[0]
+    delete next[oldest]
+  }
+  return next
+}
+
+function sanitizeForDisplay(value: any): any {
+  if (typeof value === 'string') {
+    if (value.length > 240) {
+      return `${value.slice(0, 240)}...[truncated:${value.length}]`
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => sanitizeForDisplay(v))
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {}
+    for (const [k, v] of Object.entries(value)) {
+      if (k === 'content_base64') {
+        const len = typeof v === 'string' ? v.length : 0
+        out[k] = `<base64:${len} chars>`
+      } else {
+        out[k] = sanitizeForDisplay(v)
+      }
+    }
+    return out
+  }
+  return value
 }
 
 function App() {
@@ -46,11 +99,11 @@ function App() {
     () => localStorage.getItem('vectorshell:token') || 'change-me-api-token',
   )
   const [showSettings, setShowSettings] = useState(false)
-
   const [sessions, setSessions] = useState<Session[]>([])
-  const [selectedSession, setSelectedSession] = useState<string>('')
+  const [selectedInstallId, setSelectedInstallId] = useState<string>('')
   const [conversationId, setConversationId] = useState<string>('')
   const [sessionCache, setSessionCache] = useState<Record<string, { conversationId: string; chat: ChatItem[] }>>({})
+  const [sessionStreamStatus, setSessionStreamStatus] = useState<StreamStatus>('disconnected')
 
   const [chat, setChat] = useState<ChatItem[]>([])
   const [input, setInput] = useState('')
@@ -58,6 +111,7 @@ function App() {
 
   const [showUpload, setShowUpload] = useState(false)
   const [showDownload, setShowDownload] = useState(false)
+  const [showArtifactUpload, setShowArtifactUpload] = useState(false)
   const [uploadDst, setUploadDst] = useState('/tmp/upload.bin')
   const [downloadSrc, setDownloadSrc] = useState('/etc/hostname')
   const [downloadFilename, setDownloadFilename] = useState('download.bin')
@@ -72,7 +126,10 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement | null>(null)
   const chatBodyRef = useRef<HTMLDivElement | null>(null)
   const sessionEsRef = useRef<EventSource | null>(null)
-  const convEsRef = useRef<EventSource | null>(null)
+  const sessionReconnectTimerRef = useRef<number | null>(null)
+  const selectedInstallIdRef = useRef<string>('')
+  const conversationIdRef = useRef<string>('')
+  const sessionReconnectAttemptRef = useRef<number>(0)
 
   const api = async (path: string, init: RequestInit = {}) => {
     const res = await fetch(`${apiBase}${path}`, {
@@ -99,12 +156,15 @@ function App() {
     return logs.filter((l) => l.toLowerCase().includes(logFilter))
   }, [logs, logFilter])
 
-  const connectSessionSse = (connectionId: string) => {
+  const connectSessionSse = (installId: string) => {
+    setSessionStreamStatus('reconnecting')
     if (sessionEsRef.current) sessionEsRef.current.close()
     const es = new EventSource(
-      `${apiBase}/api/sessions/${connectionId}/events?token=${encodeURIComponent(token)}`,
+      `${apiBase}/api/sessions/${installId}/events?token=${encodeURIComponent(token)}`,
     )
     es.onmessage = (ev) => {
+      setSessionStreamStatus('connected')
+      sessionReconnectAttemptRef.current = 0
       let data: any = ev.data
       try {
         data = JSON.parse(ev.data)
@@ -112,6 +172,11 @@ function App() {
         // ignore
       }
       pushLog(`session-event ${typeof data === 'string' ? data : data.event || 'unknown'}`)
+      // Only process events for the active conversation (if any)
+      const evConvId = data.conversation_id || ''
+      if (conversationIdRef.current && evConvId && evConvId !== conversationIdRef.current) {
+        return // skip events for other conversations
+      }
       if (typeof data === 'object' && data.event === 'exec.result') {
         setChat((prev) => [
           ...prev,
@@ -134,32 +199,19 @@ function App() {
           { kind: 'tool', ts: now(), text: `Tool Use: ${data.tool_name} -> ok=${data.ok}` },
         ])
       }
-    }
-    es.onerror = () => pushLog('session-event stream disconnected')
-    sessionEsRef.current = es
-  }
-
-  const connectConversationSse = (convId: string) => {
-    if (convEsRef.current) convEsRef.current.close()
-    const es = new EventSource(
-      `${apiBase}/api/conversations/${convId}/events?token=${encodeURIComponent(token)}`,
-    )
-    es.onmessage = (ev) => {
-      let data: any = ev.data
-      try {
-        data = JSON.parse(ev.data)
-      } catch {
-        // ignore
-      }
       if (typeof data === 'object') {
-        pushLog(`conversation-event ${data.event || 'unknown'}`)
+        if (data.event === 'error') {
+          const detail = String(data.message || 'unknown error')
+          setChat((prev) => [...prev, { kind: 'system', ts: now(), text: `Conversation error: ${detail}` }])
+        }
         if (data.event === 'agent.message' && data.content) {
           setChat((prev) => [...prev, { kind: 'assistant', ts: now(), text: data.content }])
         }
         if (data.event === 'tool.started') {
+          const safeArgs = sanitizeForDisplay(data.args || {})
           setChat((prev) => [
             ...prev,
-            { kind: 'tool', ts: now(), text: `Tool Use: ${data.tool_name} ${JSON.stringify(data.args || {})}` },
+            { kind: 'tool', ts: now(), text: `Tool Use: ${data.tool_name} ${JSON.stringify(safeArgs)}` },
           ])
         }
         if (data.event === 'tool.finished') {
@@ -170,8 +222,23 @@ function App() {
         }
       }
     }
-    es.onerror = () => pushLog('conversation-event stream disconnected')
-    convEsRef.current = es
+    es.onerror = () => {
+      setSessionStreamStatus('reconnecting')
+      pushLog('session-event stream disconnected')
+      if (sessionReconnectTimerRef.current) {
+        window.clearTimeout(sessionReconnectTimerRef.current)
+      }
+      const attempt = sessionReconnectAttemptRef.current
+      const delay = reconnectDelay(attempt)
+      sessionReconnectAttemptRef.current = attempt + 1
+      pushLog(`session reconnect in ${delay}ms (attempt ${attempt + 1})`)
+      sessionReconnectTimerRef.current = window.setTimeout(() => {
+        if (selectedInstallIdRef.current === installId) {
+          connectSessionSse(installId)
+        }
+      }, delay)
+    }
+    sessionEsRef.current = es
   }
 
   const loadSessions = async () => {
@@ -180,57 +247,61 @@ function App() {
     pushLog(`loaded sessions: ${(data.sessions || []).length}`)
   }
 
-  const onSelectSession = async (connectionId: string) => {
-    if (selectedSession && selectedSession !== connectionId) {
-      setSessionCache((prev) => ({
-        ...prev,
-        [selectedSession]: { conversationId, chat },
-      }))
+  const createConversationForSession = async (installId: string) => {
+    const conv = await api('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ install_id: installId, title: 'webapp' }),
+    })
+    const convId = String(conv.conversation_id || '')
+    if (!convId) throw new Error('server returned empty conversation id')
+    setConversationId(convId)
+    pushLog(`conversation ready: ${convId}`)
+    return convId
+  }
+
+  const onSelectSession = async (installId: string) => {
+    if (selectedInstallId && selectedInstallId !== installId) {
+      setSessionCache((prev) => cacheWithLimit(prev, selectedInstallId, { conversationId, chat }))
     }
 
-    setSelectedSession(connectionId)
+    setSelectedInstallId(installId)
+    localStorage.setItem('vectorshell:selectedInstallId', installId)
 
-    const cached = sessionCache[connectionId]
+    const cached = sessionCache[installId]
     if (cached) {
       setConversationId(cached.conversationId)
       setChat(cached.chat)
-      connectSessionSse(connectionId)
-      if (cached.conversationId) {
-        connectConversationSse(cached.conversationId)
-      }
-      pushLog(`restored cached session context: ${connectionId}`)
+      connectSessionSse(installId)
+      pushLog(`restored cached session context: ${installId} conv=${cached.conversationId}`)
       return
     }
 
-    setChat([{ kind: 'system', ts: now(), text: `selected session ${connectionId}` }])
-    connectSessionSse(connectionId)
-    const history = await api(`/api/sessions/${connectionId}/history`)
+    setChat([{ kind: 'system', ts: now(), text: `selected session ${installId}` }])
+    connectSessionSse(installId)
+    const history = await api(`/api/sessions/${installId}/history`)
     const restoredChat: ChatItem[] = (history.messages || []).map((m: any) => {
       if (m.role === 'assistant') return { kind: 'assistant', ts: now(), text: m.content }
       if (m.role === 'user') return { kind: 'user', ts: now(), text: m.content }
       return { kind: 'system', ts: now(), text: `${m.role}: ${m.content}` }
     })
     setChat((prev) => {
-      const seed = [{ kind: 'system', ts: now(), text: `selected session ${connectionId}` } as ChatItem]
+      const seed = [{ kind: 'system', ts: now(), text: `selected session ${installId}` } as ChatItem]
       return [...seed, ...restoredChat, ...prev.filter((x) => x.kind === 'system' && x.text.includes('selected session'))]
     })
 
-    const conv = await api('/api/conversations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ connection_id: connectionId, title: 'webapp' }),
-    })
-    setConversationId(conv.conversation_id)
-    localStorage.setItem('vectorshell:selectedSession', connectionId)
-    connectConversationSse(conv.conversation_id)
-    pushLog(`conversation auto-created: ${conv.conversation_id}`)
+    await createConversationForSession(installId)
   }
 
   const sendChatMessage = async (text: string) => {
-    if (!conversationId) {
-      throw new Error('conversation is not ready')
+    if (!selectedInstallId) {
+      throw new Error('session not selected')
     }
-    await api(`/api/conversations/${conversationId}/messages`, {
+    let activeConversationId = conversationId
+    if (!activeConversationId) {
+      activeConversationId = await createConversationForSession(selectedInstallId)
+    }
+    await api(`/api/conversations/${activeConversationId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
@@ -238,8 +309,8 @@ function App() {
   }
 
   const callTool = async (tool_name: string, args: any) => {
-    if (!selectedSession) throw new Error('session not selected')
-    return api(`/api/sessions/${selectedSession}/tools`, {
+    if (!selectedInstallId) throw new Error('session not selected')
+    return api(`/api/sessions/${selectedInstallId}/tools`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tool_name, args, timeout_ms: 180000 }),
@@ -292,8 +363,8 @@ function App() {
     }
 
     if (text === '/clean') {
-      if (!selectedSession) throw new Error('session not selected')
-      await api(`/api/sessions/${selectedSession}/clean`, { method: 'POST' })
+      if (!selectedInstallId) throw new Error('session not selected')
+      await api(`/api/sessions/${selectedInstallId}/clean`, { method: 'POST' })
       setChat([{ kind: 'system', ts: now(), text: 'History cleaned for current install_id.' }])
       pushLog('history cleaned via /clean')
       return
@@ -327,12 +398,17 @@ function App() {
   }
 
   useEffect(() => {
-    if (!selectedSession) return
-    setSessionCache((prev) => ({
-      ...prev,
-      [selectedSession]: { conversationId, chat },
-    }))
-  }, [selectedSession, conversationId, chat])
+    if (!selectedInstallId) return
+    setSessionCache((prev) => cacheWithLimit(prev, selectedInstallId, { conversationId, chat }))
+  }, [selectedInstallId, conversationId, chat])
+
+  useEffect(() => {
+    selectedInstallIdRef.current = selectedInstallId
+  }, [selectedInstallId])
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
 
   const submitUpload = async (file: File | null) => {
     if (!file) throw new Error('no file selected')
@@ -356,6 +432,25 @@ function App() {
       { kind: 'tool', ts: now(), text: `Tool Result: upload_file ok=${result.ok}` },
     ])
     setShowUpload(false)
+  }
+
+  const submitArtifactUpload = async (file: File | null) => {
+    if (!file) throw new Error('no file selected')
+    const form = new FormData()
+    form.append('file', file)
+    const uploadRes = await fetch(`${apiBase}/api/artifacts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    })
+    if (!uploadRes.ok) throw new Error(await uploadRes.text())
+    const artifact = await uploadRes.json()
+    pushLog(`artifact uploaded: ${artifact.artifact_id} (${artifact.size_bytes || 0} bytes)`)
+    setChat((prev) => [
+      ...prev,
+      { kind: 'tool', ts: now(), text: `Artifact uploaded: ${artifact.artifact_id} size=${artifact.size_bytes || 0}` },
+    ])
+    setShowArtifactUpload(false)
   }
 
   const submitDownload = async () => {
@@ -418,18 +513,28 @@ function App() {
   }, [chat])
 
   useEffect(() => {
-    loadSessions().catch((e) => pushLog(`load sessions error: ${String(e)}`))
+    loadSessions()
+      .then(() => {
+        const remembered = localStorage.getItem('vectorshell:selectedInstallId')
+        if (remembered && !selectedInstallId) {
+          return onSelectSession(remembered)
+        }
+      })
+      .catch((e) => pushLog(`load sessions error: ${String(e)}`))
     return () => {
       sessionEsRef.current?.close()
-      convEsRef.current?.close()
+      setSessionStreamStatus('disconnected')
+      if (sessionReconnectTimerRef.current) {
+        window.clearTimeout(sessionReconnectTimerRef.current)
+      }
     }
   }, [])
 
   useEffect(() => {
     if (!sessions.length) return
-    const remembered = localStorage.getItem('vectorshell:selectedSession')
+    const remembered = localStorage.getItem('vectorshell:selectedInstallId')
     if (!remembered) return
-    if (sessions.some((s) => s.connection_id === remembered) && selectedSession !== remembered) {
+    if (sessions.some((s) => s.install_id === remembered) && selectedInstallId !== remembered) {
       onSelectSession(remembered).catch((e) => pushLog(`restore session failed: ${String(e)}`))
     }
   }, [sessions])
@@ -445,26 +550,52 @@ function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <h1>VectorShell</h1>
-        <button className="gear" onClick={() => setShowSettings(true)}>
-          ⚙️
+        <div className="topbar-brand">
+          <div className="topbar-logo">
+            <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <polygon points="14,2 26,8 26,20 14,26 2,20 2,8" stroke="#00e5cc" strokeWidth="1.5" fill="none"/>
+              <polygon points="14,6 22,10 22,18 14,22 6,18 6,10" stroke="#00e5cc" strokeWidth="1" fill="rgba(0,229,204,0.08)"/>
+              <circle cx="14" cy="14" r="3" fill="#00e5cc"/>
+              <line x1="14" y1="2" x2="14" y2="6" stroke="#00e5cc" strokeWidth="1"/>
+              <line x1="14" y1="22" x2="14" y2="26" stroke="#00e5cc" strokeWidth="1"/>
+              <line x1="26" y1="8" x2="22" y2="10" stroke="#00e5cc" strokeWidth="1"/>
+              <line x1="6" y1="18" x2="2" y2="20" stroke="#00e5cc" strokeWidth="1"/>
+              <line x1="2" y1="8" x2="6" y2="10" stroke="#00e5cc" strokeWidth="1"/>
+              <line x1="22" y1="18" x2="26" y2="20" stroke="#00e5cc" strokeWidth="1"/>
+            </svg>
+          </div>
+          <h1>VectorShell</h1>
+        </div>
+        <div className="topbar-status">
+          <div className="topbar-status-dot" />
+          <span>ONLINE</span>
+        </div>
+        <button className="gear" onClick={() => setShowSettings(true)} aria-label="Settings">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="2.5" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
         </button>
       </header>
 
       <div className="layout">
         <aside className="session-panel">
-          <div className="panel-title">Sessions</div>
-          {sessions.map((s) => (
-            <button
-              key={s.connection_id}
-              className={`session-item ${selectedSession === s.connection_id ? 'active' : ''}`}
-              onClick={() => onSelectSession(s.connection_id)}
-            >
-              <div>{s.hostname}</div>
-              <small>{s.username} · {s.connection_id.slice(0, 8)}</small>
-            </button>
-          ))}
-          <button className="refresh" onClick={() => loadSessions().catch((e) => pushLog(String(e)))}>Refresh</button>
+          <div className="panel-section">
+            <div className="panel-title">Sessions</div>
+            <div className="session-list">
+              {sessions.map((s) => (
+                <button
+                  key={s.install_id}
+                  className={`session-item ${selectedInstallId === s.install_id ? 'active' : ''}`}
+                  onClick={() => onSelectSession(s.install_id)}
+                >
+                  <div className="session-host">{s.hostname}</div>
+                  <div className="session-meta">{s.username}<span> · </span>{s.install_id.slice(0, 8)}</div>
+                </button>
+              ))}
+            </div>
+            <button className="refresh-btn" onClick={() => loadSessions().catch((e) => pushLog(String(e)))}>↻ Refresh</button>
+          </div>
 
           <div className="client-card">
             <div className="panel-title">Generate Client</div>
@@ -481,27 +612,36 @@ function App() {
             </button>
           </div>
 
-          <div className="logs-toolbar">
-            <select value={logFilter} onChange={(e) => setLogFilter(e.target.value as any)}>
-              <option value="all">all</option>
-              <option value="agent">agent</option>
-              <option value="tool">tool</option>
-              <option value="exec">exec</option>
-            </select>
-            <button onClick={() => setLogs([])}>Clear Logs</button>
+          <div className="logs-section">
+            <div className="logs-toolbar">
+              <select value={logFilter} onChange={(e) => setLogFilter(e.target.value as any)}>
+                <option value="all">all</option>
+                <option value="agent">agent</option>
+                <option value="tool">tool</option>
+                <option value="exec">exec</option>
+              </select>
+              <button onClick={() => setLogs([])}>Clear</button>
+            </div>
+            <pre className="logs-box">{filteredLogs.join('\n')}</pre>
           </div>
-          <pre className="logs-box">{filteredLogs.join('\n')}</pre>
         </aside>
 
         <section className="chat-panel">
           <div className="chat-header">
-            <div>conversation: {conversationId || '-'}</div>
+            <div className="chat-header-top">conversation: <span>{conversationId || '-'}</span></div>
+            <div className="stream-status-row">
+              <span className={`stream-pill ${sessionStreamStatus}`}>stream: {sessionStreamStatus}</span>
+            </div>
           </div>
           <div className="chat-body" ref={chatBodyRef}>
             {chat.map((m, idx) => {
               if (m.kind === 'tool') {
-                const icon = m.text.toLowerCase().includes('result') ? '✅' : '🛠️'
-                return <div key={idx} className="tool-row">{icon} {m.text}</div>
+                const lower = m.text.toLowerCase()
+                const cls = lower.includes('result:') && lower.includes('ok=true') ? 'tool-row tool-ok'
+                  : lower.includes('result:') && (lower.includes('ok=false') || lower.includes('error')) ? 'tool-row tool-err'
+                  : lower.includes('tool use:') ? 'tool-row tool-start'
+                  : 'tool-row'
+                return <div key={idx} className={cls}>{m.text}</div>
               }
               if (m.kind === 'system') {
                 return <div key={idx} className="system-row">{m.text}</div>
@@ -518,8 +658,8 @@ function App() {
                 const open = activeExecMeta[idx] || false
                 return (
                   <div key={idx} className="bubble left exec-card">
-                    <div className="meta">Exec · {m.ts} · exit={m.exitCode} · {m.durationMs}ms</div>
-                    <div className="mono">$ {m.command}</div>
+                    <div className="meta">exec · {m.ts} · exit={m.exitCode} · {m.durationMs}ms</div>
+                    <div className="exec-command">{m.command}</div>
                     {m.stdout ? <pre className="stdout">{m.stdout}</pre> : null}
                     {m.stderr ? <pre className="stderr">{m.stderr}</pre> : null}
                     <button
@@ -550,16 +690,39 @@ function App() {
             <div ref={chatEndRef} />
           </div>
 
-          <div className="chat-input">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onInputKeyDown}
-              placeholder="Type message or /help /exec /upload /download"
-            />
-            <button onClick={() => onSubmitInput().catch((e) => setChat((p) => [...p, { kind: 'system', ts: now(), text: String(e) }]))}>
-              Send
-            </button>
+          <div className="chat-input-strip">
+            <div className="chat-tools">
+              <button title="Upload file to client" aria-label="Upload file to client" onClick={() => setShowUpload(true)}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 9V1M4 6l3-3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M1 10v2a1 1 0 001 1h10a1 1 0 001-1v-2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </button>
+              <button title="Download file from client" aria-label="Download file from client" onClick={() => setShowDownload(true)}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <path d="M7 1v8M4 5l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M1 4v2a1 1 0 001 1h10a1 1 0 001-1V4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </button>
+              <button title="Upload artifact" aria-label="Upload artifact" onClick={() => setShowArtifactUpload(true)}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <rect x="1" y="1" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M4 7l2-2 2 2 2-2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M7 5v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <div className="chat-input-row">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={onInputKeyDown}
+                placeholder="Type message or /help /exec"
+              />
+              <button className="send-btn" onClick={() => onSubmitInput().catch((e) => setChat((p) => [...p, { kind: 'system', ts: now(), text: String(e) }]))}>
+                Send
+              </button>
+            </div>
           </div>
         </section>
       </div>
@@ -597,6 +760,13 @@ function App() {
           onSubmit={submitDownload}
         />
       ) : null}
+
+      {showArtifactUpload ? (
+        <ArtifactUploadDialog
+          onClose={() => setShowArtifactUpload(false)}
+          onSubmit={submitArtifactUpload}
+        />
+      ) : null}
     </div>
   )
 }
@@ -621,7 +791,7 @@ function UploadDialog({
         <label>Client destination<input value={dst} onChange={(e) => onDstChange(e.target.value)} /></label>
         <div className="row-end">
           <button onClick={onClose}>Cancel</button>
-          <button onClick={() => onSubmit(fileRef.current?.files?.[0] || null).catch(console.error)}>Upload</button>
+          <button className="primary" onClick={() => onSubmit(fileRef.current?.files?.[0] || null).catch(console.error)}>Upload</button>
         </div>
       </div>
     </div>
@@ -651,7 +821,29 @@ function DownloadDialog({
         <label>Local filename<input value={filename} onChange={(e) => onFilenameChange(e.target.value)} /></label>
         <div className="row-end">
           <button onClick={onClose}>Cancel</button>
-          <button onClick={() => onSubmit().catch(console.error)}>Download</button>
+          <button className="primary" onClick={() => onSubmit().catch(console.error)}>Download</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ArtifactUploadDialog({
+  onClose,
+  onSubmit,
+}: {
+  onClose: () => void
+  onSubmit: (file: File | null) => Promise<void>
+}) {
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>Upload Artifact</h3>
+        <label>Local file<input ref={fileRef} type="file" /></label>
+        <div className="row-end">
+          <button onClick={onClose}>Cancel</button>
+          <button className="primary" onClick={() => onSubmit(fileRef.current?.files?.[0] || null).catch(console.error)}>Upload</button>
         </div>
       </div>
     </div>

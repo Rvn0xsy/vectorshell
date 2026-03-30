@@ -12,7 +12,7 @@ pub type ToolEventEmitter = Arc<dyn Fn(Value) + Send + Sync>;
 #[derive(Clone)]
 pub struct ExecTool {
     manager: Arc<Mutex<ClientManager>>,
-    client_id: String,
+    session_id: String,
     last_output: Arc<Mutex<Option<Value>>>,
     ui_state: Arc<Mutex<UiState>>,
     event_emitter: Option<ToolEventEmitter>,
@@ -21,14 +21,14 @@ pub struct ExecTool {
 impl ExecTool {
     pub fn new(
         manager: Arc<Mutex<ClientManager>>,
-        client_id: String,
+        session_id: String,
         last_output: Arc<Mutex<Option<Value>>>,
         ui_state: Arc<Mutex<UiState>>,
         event_emitter: Option<ToolEventEmitter>,
     ) -> Self {
         Self {
             manager,
-            client_id,
+            session_id,
             last_output,
             ui_state,
             event_emitter,
@@ -90,7 +90,7 @@ impl Tool for ExecTool {
             let call_args = args.command.clone();
             let (request_id, receiver) = mgr
                 .dispatch_tool_call(
-                    &self.client_id,
+                    &self.session_id,
                     "exec",
                     serde_json::json!({ "command": call_args }),
                     Some(60_000),

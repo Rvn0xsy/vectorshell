@@ -1,5 +1,5 @@
 use serde::Serialize;
-use shared::protocol::{ExecMessage, ServerToClientMessage, ToolCallMessage, ToolResultMessage};
+use shared::protocol::{ExecMessage, RegisteredMessage, ServerToClientMessage, ToolCallMessage, ToolResultMessage};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -7,9 +7,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientMetadata {
-    pub client_id: String,
-    pub connection_id: String,
     pub install_id: String,
+    pub session_id: String,
     pub build_uuid: String,
     pub last_heartbeat: u64,
     pub hostname: String,
@@ -25,9 +24,8 @@ pub struct ClientMetadata {
 impl ClientMetadata {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        client_id: String,
-        connection_id: String,
         install_id: String,
+        session_id: String,
         build_uuid: String,
         hostname: String,
         username: String,
@@ -39,9 +37,8 @@ impl ClientMetadata {
         capabilities: Vec<String>,
     ) -> Self {
         Self {
-            client_id,
-            connection_id,
             install_id,
+            session_id,
             build_uuid,
             last_heartbeat: 0,
             hostname,
@@ -75,7 +72,10 @@ pub struct ExecHistoryEntry {
 
 #[derive(Debug, Default)]
 pub struct ClientManager {
+    /// Primary: keyed by server-assigned session_id
     clients: HashMap<String, ClientConnection>,
+    /// O(1) lookup from install_id -> session_id
+    by_install_id: HashMap<String, String>,
     exec_history: HashMap<String, Vec<ExecHistoryEntry>>,
     pending_exec: HashMap<String, oneshot::Sender<ExecHistoryEntry>>,
     pending_tool: HashMap<String, oneshot::Sender<ToolResultMessage>>,
@@ -85,21 +85,57 @@ impl ClientManager {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
+            by_install_id: HashMap::new(),
             exec_history: HashMap::new(),
             pending_exec: HashMap::new(),
             pending_tool: HashMap::new(),
         }
     }
 
+    /// Generate a new session_id for a connecting client.
+    pub fn generate_session_id() -> String {
+        Uuid::new_v4().to_string()
+    }
+
+    /// Send the Registered acknowledgment back to the client.
+    pub fn send_registered(
+        sender: &mpsc::UnboundedSender<ServerToClientMessage>,
+        id: &str,
+        session_id: &str,
+        install_id: &str,
+    ) {
+        let msg = ServerToClientMessage::Registered {
+            id: id.to_string(),
+            payload: RegisteredMessage {
+                session_id: session_id.to_string(),
+                install_id: install_id.to_string(),
+            },
+        };
+        let _ = sender.send(msg);
+    }
+
     pub fn register(
         &mut self,
-        client_id: String,
+        session_id: String,
         sender: mpsc::UnboundedSender<ServerToClientMessage>,
         metadata: ClientMetadata,
     ) {
-        tracing::info!(client_id = %metadata.client_id, connection_id = %metadata.connection_id, "client connected");
-        self.clients
-            .insert(client_id, ClientConnection { sender, metadata });
+        tracing::info!(
+            session_id = %session_id,
+            install_id = %metadata.install_id,
+            "client registered"
+        );
+
+        // If this install_id already had a session, remove the stale entry.
+        if let Some(old_session_id) = self.by_install_id.get(&metadata.install_id) {
+            self.clients.remove(old_session_id);
+        }
+
+        self.by_install_id.insert(metadata.install_id.clone(), session_id.clone());
+        self.clients.insert(
+            session_id,
+            ClientConnection { sender, metadata },
+        );
     }
 
     pub fn list_clients(&self) -> Vec<ClientMetadata> {
@@ -108,26 +144,33 @@ impl ClientManager {
             .values()
             .map(|c| c.metadata.clone())
             .collect::<Vec<_>>();
-        list.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
+        list.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         list
     }
 
-    pub fn get_client_metadata(&self, client_id: &str) -> Option<ClientMetadata> {
+    pub fn get_client_metadata(&self, session_id: &str) -> Option<ClientMetadata> {
         self.clients
-            .get(client_id)
+            .get(session_id)
             .map(|conn| conn.metadata.clone())
     }
 
-    pub fn get_by_connection_id(&self, connection_id: &str) -> Option<ClientMetadata> {
+    /// Look up by install_id, returning the full metadata of the current active session.
+    pub fn get_by_install_id(&self, install_id: &str) -> Option<ClientMetadata> {
+        let session_id = self.by_install_id.get(install_id)?;
+        self.clients.get(session_id).map(|conn| conn.metadata.clone())
+    }
+
+    /// Look up by session_id (internal primary key).
+    #[allow(dead_code)]
+    pub fn get_by_session_id(&self, session_id: &str) -> Option<ClientMetadata> {
         self.clients
-            .values()
-            .find(|conn| conn.metadata.connection_id == connection_id)
+            .get(session_id)
             .map(|conn| conn.metadata.clone())
     }
 
-    pub fn record_exec_result(&mut self, client_id: &str, exec_id: &str, entry: ExecHistoryEntry) {
+    pub fn record_exec_result(&mut self, session_id: &str, exec_id: &str, entry: ExecHistoryEntry) {
         self.exec_history
-            .entry(client_id.to_string())
+            .entry(session_id.to_string())
             .or_default()
             .push(entry);
 
@@ -138,7 +181,7 @@ impl ClientManager {
         if let Some(sender) = self.pending_exec.remove(exec_id) {
             let _ = sender.send(
                 self.exec_history
-                    .get(client_id)
+                    .get(session_id)
                     .and_then(|v| v.last().cloned())
                     .unwrap_or(ExecHistoryEntry {
                         command: String::new(),
@@ -159,20 +202,20 @@ impl ClientManager {
         }
     }
 
-    pub fn get_exec_history(&self, client_id: &str) -> Vec<ExecHistoryEntry> {
+    pub fn get_exec_history(&self, session_id: &str) -> Vec<ExecHistoryEntry> {
         self.exec_history
-            .get(client_id)
+            .get(session_id)
             .cloned()
             .unwrap_or_default()
     }
 
-    pub fn send_exec(&self, client_id: &str, command: &str) -> Result<(), String> {
+    pub fn send_exec(&self, session_id: &str, command: &str) -> Result<(), String> {
         let connection = self
             .clients
-            .get(client_id)
+            .get(session_id)
             .ok_or_else(|| "client not found".to_string())?;
 
-        tracing::info!(client_id = %client_id, command = %command, "dispatching exec");
+        tracing::info!(session_id = %session_id, command = %command, "dispatching exec");
         let msg = ServerToClientMessage::Exec {
             id: Uuid::new_v4().to_string(),
             payload: ExecMessage {
@@ -188,14 +231,14 @@ impl ClientManager {
 
     pub fn dispatch_tool_call(
         &mut self,
-        client_id: &str,
+        session_id: &str,
         tool_name: &str,
         args: serde_json::Value,
         timeout_ms: Option<u64>,
     ) -> Result<(String, oneshot::Receiver<ToolResultMessage>), String> {
         let connection = self
             .clients
-            .get(client_id)
+            .get(session_id)
             .ok_or_else(|| "client not found".to_string())?;
 
         if !connection.metadata.capabilities.is_empty()
@@ -232,8 +275,8 @@ impl ClientManager {
         Ok((tool_id, rx))
     }
 
-    pub fn update_heartbeat(&mut self, client_id: &str, timestamp: u64) {
-        if let Some(conn) = self.clients.get_mut(client_id) {
+    pub fn update_heartbeat(&mut self, session_id: &str, timestamp: u64) {
+        if let Some(conn) = self.clients.get_mut(session_id) {
             conn.metadata.last_heartbeat = timestamp;
         }
     }
