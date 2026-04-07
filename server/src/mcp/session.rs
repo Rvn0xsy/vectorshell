@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! MCP session state management.
 
 use std::collections::HashMap;

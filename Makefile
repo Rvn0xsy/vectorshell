@@ -1,14 +1,12 @@
-.PHONY: build build-release build-server build-client test up run clean help
+.PHONY: build build-release build-server test up run clean help
 
 # Default target
 help:
 	@echo "VectorShell Makefile"
 	@echo ""
 	@echo "Usage:"
-	@echo "  make build          Build debug binaries (server + client)"
-	@echo "  make build-release  Build release binaries"
-	@echo "  make build-server   Build only the server"
-	@echo "  make build-client   Build only the client"
+	@echo "  make build          Build release binaries (server + client) + frontend"
+	@echo "  make build-server   Build only the server (release)"
 	@echo "  make test           Run all Rust tests"
 	@echo "  make test-watch     Run tests in watch mode (requires cargo-watch)"
 	@echo "  make up             Run the server with default config"
@@ -17,7 +15,7 @@ help:
 	@echo "  make web-dev        Start dashboard Vite dev server"
 	@echo "  make web-build      Build dashboard for production"
 	@echo "  make lint           Lint the Rust workspace"
-	@echo "  make gen-client     Generate client binary (release)"
+	@echo "  make gen-client     Generate client binary with embedded config"
 	@echo "  make gen-client TARGET=linux-arm64  Generate for specific target"
 
 # Build commands
@@ -28,10 +26,7 @@ build-release:
 	cargo build --release
 
 build-server:
-	cargo build -p vectorshell-server
-
-build-client:
-	cargo build -p vectorshell-client
+	cargo build -p vectorshell-server --release
 
 gen-client:
 	cargo run -p vectorshell-server -- --config config/config.toml generate-client $(if $(TARGET),--target $(TARGET),)

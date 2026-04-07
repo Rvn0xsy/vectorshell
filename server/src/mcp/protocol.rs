@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! MCP JSON-RPC protocol types for MCP 2025-11-25.
 
 use serde::{Deserialize, Serialize};

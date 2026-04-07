@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! VectorShell MCP Server.
 //!
 //! Implements the MCP 2025-11-25 protocol (Streamable HTTP+SSE) as an
