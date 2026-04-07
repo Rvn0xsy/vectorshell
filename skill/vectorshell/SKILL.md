@@ -1,137 +1,237 @@
 ---
-name: vectorshell-server-api-operator
-description: Operate online VectorShell clients strictly via VectorShell Server API. Use this skill whenever the user asks to list/select sessions, create conversations, send messages, subscribe to SSE events, dispatch remote tools, upload/download artifacts, or perform remote actions without direct host login.
+name: vectorshell
+description: Use when working with VectorShell — either developing the codebase (building, testing, configuring, generating clients) or operating live sessions via the server API (listing sessions, sending messages, dispatching tools, handling artifacts). Triggers include building the project, running tests, understanding architecture, config.toml settings, Makefile commands, REPL usage, or any remote execution workflow through the API.
 ---
 
-# VectorShell Server API Operator
+# VectorShell
 
-## Purpose
+## Project overview
 
-Use this skill to remotely operate connected clients **only through server API endpoints**.
+VectorShell is an AI-driven remote command execution platform written in Rust.
 
-This skill does not require direct SSH/RDP access and does not modify client binaries.
+- **Server** hosts the AI agent, REST API, WebSocket hub, and serves the frontend UI.
+- **Client** connects back to server over reverse WebSocket, executes server-issued tools, returns results.
+- **Shared** defines the wire protocol (JSON tagged enums over WebSocket).
+- **Dashboard** is the React/Vite frontend.
+
+## Two usage modes
+
+### Development mode
+
+Use `vectorshell` skill for development tasks: building, testing, configuring, generating client binaries, understanding architecture.
+
+### Operations mode
+
+Use `vectorshell` skill for operating live sessions via the REST API and SSE streams.
 
 ---
 
-## When to use
+## Development reference
 
-Use this skill when tasks include:
+### Common commands
 
-- list online sessions and choose a target client
-- create/send conversation messages through API
-- watch SSE stream for tool/agent progress
-- call remote tools on selected session
-- upload artifacts for remote actions
-- download artifacts/results from server API
-- troubleshoot API-side failures (`unauthorized`, `not_found`, `capability_mismatch`, `tool_timeout`)
+```bash
+# Build everything (Rust release + frontend)
+make build
+
+# Build Rust only
+cargo build --release
+
+# Run server
+make up
+
+# Generate client binary (embeds config at compile time)
+make gen-client
+make gen-client TARGET=linux-arm64
+
+# Test
+cargo test
+cargo test -p shared
+cargo test -p shared register_message_roundtrip -- --exact
+
+# Frontend dev
+make web-dev      # Vite dev server (port 5173)
+make web-build   # Production build
+
+# Lint
+make lint         # fmt + clippy
+```
+
+### Makefile targets
+
+| Command | Description |
+|---------|-------------|
+| `make build` | Rust release + frontend production build |
+| `make build-release` | Rust release only |
+| `make build-server` | Server only |
+| `make build-client` | Client only |
+| `make test` | All Rust tests |
+| `make up` | Run server with default config |
+| `make web-dev` | Start Vite dev server |
+| `make web-build` | Build frontend |
+| `make gen-client` | Generate client binary |
+| `make gen-client TARGET=x` | Cross-compile for target |
+| `make lint` | Format + clippy |
+| `make clean` | Clean artifacts |
+
+### Configuration (`config/config.toml`)
+
+```toml
+[server]
+listen = "0.0.0.0:8080"
+ws_path = "/ws"
+ui_path = "/ui"              # frontend URL path (default: /ui)
+ui_dist = "dashboard/dist"   # frontend dist (omit to disable)
+
+[agent]
+model = "gpt-5.2-codex"
+base_url = "https://api.openai.com/v1"
+api_key = "..."
+
+[client]
+default_server = "wss://..."
+reconnect_interval = 5
+insecure_tls = false
+
+[auth]
+api_token = "..."     # REST API Bearer token
+client_token = "..."  # Client WebSocket auth
+```
+
+Agent preamble: `config/SOUL.md` (loaded when present).
+
+### Session identity model
+
+| Term | Scope | Purpose |
+|------|-------|---------|
+| `connection_id` | live connection | Single WebSocket connection identifier |
+| `session_id` | live routing | Server-assigned; used for live message routing |
+| `install_id` | persistent | Stable across reconnects; all history keyed by this |
+
+The REPL `/use <install_id>` maps to `session_id` via `ClientManager::get_by_install_id`.
+
+### Architecture
+
+Three crates:
+- `server/` — axum API server, LLM agent (rig), WebSocket hub, SQLite (`data/vectorshell.db`), event bus
+- `client/` — reverse-connect WS client; embeds config via `env!` constants
+- `shared/` — wire protocol (`shared/src/protocol.rs`)
+
+Agent/tool flow: server agent → `ClientManager` → selected client → result back. Server never executes tools locally.
+
+### Cross-compilation targets
+
+| Alias | Triple |
+|-------|--------|
+| `linux-amd64` | `x86_64-unknown-linux-gnu` |
+| `linux-arm64` | `aarch64-unknown-linux-gnu` |
+| `windows-amd64` | `x86_64-pc-windows-gnu` |
+| `windows-arm64` | `aarch64-pc-windows-gnu` |
+| `macos-amd64` | `x86_64-apple-darwin` |
+| `macos-arm64` | `aarch64-apple-darwin` |
+
+Embedded env vars: `VECTOR_SERVER_URL`, `VECTOR_AUTH_TOKEN`, `VECTOR_RECONNECT_INTERVAL`, `VECTOR_INSECURE_TLS`, `VECTOR_BUILD_UUID`. Config change → re-run `make gen-client`.
+
+### Server REPL commands
+
+| Command | Description |
+|---------|-------------|
+| `/sessions` | List connected clients |
+| `/use <install_id>` | Select client (enters agent mode) |
+| `/info` | Show selected session details |
+| `/exec <cmd>` | Execute raw command on selected client |
+| `/read <path>` | Read file |
+| `/write <path> <content>` | Write file |
+| `/upload <src> <dst>` | Upload server file to client |
+| `/download <src> <dst>` | Download client file to server |
+| `/tool <name> <json>` | Generic tool dispatch |
+| `/agent <prompt>` | Ask AI for text response |
+| `/clear` | Clear context history |
+| `/back` | Exit agent mode |
+| `/clean` | Clear session history + context |
+| `/help` | Show all commands |
 
 ---
 
-## Required inputs
+## Operations reference
+
+### Required inputs
 
 1. `server_base_url` (example: `https://host:8443`)
 2. `api_token`
-3. task intent
-4. optional target selector (`connection_id`, hostname, OS)
+3. Task intent
+4. Optional target selector (`install_id`, hostname, OS)
 
-If target selector is missing and multiple sessions exist, ask one concise clarification question.
+If target is ambiguous and multiple sessions exist, ask one concise clarification question.
 
----
+### Operations workflow
 
-## API-first workflow
+#### 1) Session discovery
 
-### 1) Health and session discovery
+```
+GET /api/health
+GET /api/sessions
+```
 
-1. `GET /api/health`
-2. `GET /api/sessions`
-3. pick target `connection_id`
+Pick target `install_id`.
 
-### 2) Conversation channel
+#### 2) Conversation channel
 
-1. `POST /api/conversations` with `connection_id`
-2. `GET /api/conversations/{conversation_id}/events` (SSE)
-3. `POST /api/conversations/{conversation_id}/messages`
+```
+POST /api/conversations   (body: {"install_id": "..."})
+GET  /api/conversations/{conversation_id}/events  (SSE)
+POST /api/conversations/{conversation_id}/messages
+```
 
-### 3) Direct tool dispatch (when needed)
+#### 3) Direct tool dispatch
 
-1. `POST /api/sessions/{connection_id}/tools`
-2. body: `tool_name`, `args`, optional `timeout_ms`
+```
+POST /api/sessions/{install_id}/tools
+body: {"tool_name": "...", "args": {...}, "timeout_ms": ...}
+```
 
-### 4) Artifact workflow
+#### 4) Artifact workflow
 
-1. `POST /api/artifacts` -> `artifact_id`
-2. use `artifact_id` in tool args when supported
-3. `GET /api/artifacts/{artifact_id}/download`
+```
+POST /api/artifacts   → artifact_id
+use artifact_id in tool args
+GET  /api/artifacts/{artifact_id}/download
+```
 
-For concrete request/response examples, read:
-
-- `references/api-endpoints.md`
-- `references/sse-events.md`
-
----
-
-## Tool selection policy
-
-Preferred order:
+### Tool preference order
 
 1. `read_file` / `write_file`
 2. `upload_file` / `download_file`
 3. `exec`
-4. Windows CLR tools (`powershell_clr`, `dotnet_assembly`) only if capability exists
+4. Windows-only: `powershell_clr`, `dotnet_assembly` (only if client capability exists)
 
 For `.NET` payloads, prefer `artifact_id` over inline `content_base64`.
 
----
+### Error handling
 
-## Safety and logging rules
+| Error | Action |
+|-------|--------|
+| `401 unauthorized` | Verify `Authorization: Bearer <api_token>` matches `auth.api_token` |
+| `404 not_found` | Verify IDs exist; if conversation missing, recreate once |
+| `409 capability_mismatch` | Check client capabilities; switch tool or session |
+| `408/timeout` | Increase `timeout_ms`; verify client heartbeat is fresh |
 
-1. Never force unsupported tools.
+### Safety rules
+
+1. Never force unsupported tools on a client.
 2. Never expose full binary/base64 payloads in logs/UI.
-3. Sanitize args shown to users:
-   - `content_base64` -> `<base64:N chars>`
-   - long strings -> truncated with original length marker
-4. Prefer low-risk/reversible actions before destructive operations.
+3. Sanitize shown args: `content_base64` → `<base64:N chars>`; truncate long strings.
+4. Prefer low-risk/reversible actions before destructive ones.
 
----
+### Output format
 
-## Error handling playbook
+Always report:
+1. Target (`install_id` or selection rule)
+2. API calls performed
+3. Tool calls (sanitized args)
+4. Outcome/evidence
+5. Next safe step
 
-### `401 unauthorized`
-
-1. verify `Authorization: Bearer <api_token>`
-2. verify token matches server `auth.api_token`
-
-### `404 not_found`
-
-1. verify `connection_id`/`conversation_id` exists
-2. if conversation missing, recreate conversation and retry once
-
-### `409 capability_mismatch`
-
-1. verify selected session capabilities
-2. switch tool or switch target session
-
-### `408/timeout` (`tool_timeout`)
-
-1. increase `timeout_ms`
-2. verify client is online and heartbeats are fresh
-
-### `conversation-event error`
-
-1. read SSE `error.message`
-2. check server logs for matching failure context
-
-Use `references/api-endpoints.md` as the primary endpoint cookbook during execution.
-Use `references/sse-events.md` to interpret SSE payloads and event fields.
-
----
-
-## Output format
-
-When reporting execution results, include:
-
-1. selected target (`connection_id` or selection rule)
-2. API calls performed (endpoint + intent)
-3. tool calls performed (sanitized args)
-4. outcomes/evidence (success/failure + key output)
-5. next safe step
+For full endpoint examples and SSE event reference, read:
+- `references/api-endpoints.md`
+- `references/sse-events.md`

@@ -1,139 +1,129 @@
 # VectorShell SSE Events Reference
 
-This document summarizes SSE payloads used during remote operations via server API.
-
 ## Streams
 
-1. Conversation stream:
+1. **Session stream** — live exec/tool feedback:
+   ```
+   GET /api/sessions/{install_id}/events
+   ```
+   Authorization: `Authorization: Bearer <token>`
 
-- `GET /api/conversations/{conversation_id}/events`
+2. **Conversation stream** — agent/tool lifecycle:
+   ```
+   GET /api/conversations/{conversation_id}/events
+   ```
+   Authorization: `Authorization: Bearer <token>`
 
-2. Session stream:
+## Common fields
 
-- `GET /api/sessions/{connection_id}/events`
+Most events include:
 
-## Base fields
-
-Most events contain:
-
-- `event` (string)
-- `conversation_id` (string; may be empty for session-level tool events)
+- `event` (string) — event type name
 - `timestamp` (RFC3339)
-
----
-
-## Conversation stream events
-
-### 1) `conversation.started`
-
-Meaning: conversation execution started.
-
-Typical fields:
-
-- `conversation_id`
-- `connection_id`
-- `timestamp`
-
-### 2) `agent.message`
-
-Meaning: assistant output chunk/final message.
-
-Typical fields:
-
-- `role` (`assistant`)
-- `content`
-- `final` (bool)
-
-### 3) `tool.started`
-
-Meaning: a remote tool call started.
-
-Typical fields:
-
-- `request_id` (optional depending on emitter path)
-- `tool_name`
-- `args` (sanitized)
-
-### 4) `tool.progress`
-
-Meaning: tool in progress (commonly upload/download).
-
-Typical fields:
-
-- `tool_name`
-- `percent` or `detail`
-
-### 5) `tool.finished`
-
-Meaning: tool completed.
-
-Typical fields:
-
-- `tool_name`
-- `ok`
-- `duration_ms`
-- optional `data`
-- optional `error`
-
-### 6) `conversation.finished`
-
-Meaning: conversation execution completed.
-
-Typical fields:
-
-- `ok`
-
-### 7) `error`
-
-Meaning: conversation-level failure.
-
-Typical fields:
-
-- `code`
-- `message`
-
-Use `message` as primary user-facing error detail.
 
 ---
 
 ## Session stream events
 
-Session stream is mostly for direct command/tool feedback bound to a connection.
+### `exec.result`
 
-### 1) `exec.result`
+Fired when a raw `/exec` command completes.
 
 Typical fields:
-
 - `command`
 - `exit_code`
 - `duration_ms`
 - `stdout`
 - `stderr`
+- `cwd`
+- `env` (array of `["KEY=value", ...]`)
 
-### 2) `tool.result`
+### `tool.result`
+
+Fired when a tool call completes.
 
 Typical fields:
-
 - `id`
 - `tool_name`
-- `ok`
+- `ok` (bool)
 - `duration_ms`
-- `data`
-- `error`
+- `data` (tool-specific result, optional)
+- `error` (string, optional)
+
+---
+
+## Conversation stream events
+
+### `conversation.started`
+
+Conversation execution started.
+
+Typical fields:
+- `conversation_id`
+- `install_id`
+- `timestamp`
+
+### `agent.message`
+
+Assistant output chunk or final message.
+
+Typical fields:
+- `role` (`assistant`)
+- `content`
+- `final` (bool)
+
+### `tool.started`
+
+A remote tool call has started.
+
+Typical fields:
+- `tool_name`
+- `args` (sanitized — `content_base64` truncated, long strings noted)
+
+### `tool.progress`
+
+Tool in progress (upload/download).
+
+Typical fields:
+- `tool_name`
+- `percent` or `detail`
+
+### `tool.finished`
+
+Tool completed.
+
+Typical fields:
+- `tool_name`
+- `ok` (bool)
+- `duration_ms`
+- `data` (optional)
+- `error` (optional)
+
+### `conversation.finished`
+
+Conversation execution completed.
+
+Typical fields:
+- `ok`
+
+### `error`
+
+Conversation-level failure.
+
+Typical fields:
+- `code`
+- `message`
+
+Use `message` as the primary user-facing error detail.
 
 ---
 
 ## Consumer guidance
 
-1. Always handle unknown events gracefully.
-2. For `error` events, surface `message` directly.
-3. Do not render full `content_base64` if present in args/data.
-4. Treat event ordering as best-effort; reconnect logic may miss transient events.
+1. Handle unknown events gracefully (ignore or log).
+2. For `error` events, surface `message` directly to the user.
+3. Do not render full `content_base64` in logs or UI — truncate to `<base64:N chars>`.
+4. Event ordering is best-effort; reconnect logic may miss transient events.
+5. Reconnection strategy: re-subscribe and replay from last known state.
 
----
-
-## Canonical schema reference
-
-For conversation stream JSON schema, see:
-
-- `api-docs/sse-event-schema.json`
+For conversation SSE schema, see: `api-docs/sse-event-schema.json`.
