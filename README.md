@@ -251,7 +251,7 @@ vectorshell/
 ├── shared/          # Wire protocol types
 ├── dashboard/       # React/Vite frontend
 ├── config/         # Configuration files
-└── api-docs/       # REST/SSE API documentation
+└── docs/           # Project documentation (API, dev, plans, specs)
 ```
 
 ## License

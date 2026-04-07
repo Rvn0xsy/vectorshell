@@ -23,7 +23,7 @@
 - `skill/vectorshell/SKILL.md` — outdated predecessor to mine for reusable wording only
 - `skill/vectorshell/references/api-endpoints.md` — older endpoint examples to update conceptually
 - `skill/vectorshell/references/sse-events.md` — older SSE reference to update conceptually
-- `docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md` — approved design spec
+- `docs/specs/2026-03-28-vectorshell-operations-design.md` — approved design spec
 - `server/src/api/mod.rs` — source of truth for current API behavior if wording needs verification during implementation
 - `server/src/client_manager/mod.rs` — source of truth for live session semantics if needed during implementation
 - `dashboard/src/App.tsx` — useful current consumer example for conversation, session, tool, and artifact flows
@@ -38,13 +38,13 @@
 - Create: `skill/vectorshell-operations/references/message-workflow.md`
 - Create: `skill/vectorshell-operations/references/tool-artifact-workflow.md`
 - Create: `skill/vectorshell-operations/references/output-format.md`
-- Read: `docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md`
+- Read: `docs/specs/2026-03-28-vectorshell-operations-design.md`
 
 - [ ] **Step 1: Verify the approved spec content is present**
 
 Read:
 ```text
-/home/arch/Git/vectorshell/docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md
+docs/specs/2026-03-28-vectorshell-operations-design.md
 ```
 
 Expected to confirm these points before writing files:
@@ -101,7 +101,7 @@ Expected: a new commit containing the main skill file scaffold.
 **Files:**
 - Modify: `skill/vectorshell-operations/SKILL.md`
 - Read: `skill/vectorshell/SKILL.md`
-- Read: `docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md`
+- Read: `docs/specs/2026-03-28-vectorshell-operations-design.md`
 
 - [ ] **Step 1: Read the old skill to identify outdated semantics to avoid**
 
@@ -466,13 +466,13 @@ Expected: a commit containing the tool/artifact guidance.
 
 **Files:**
 - Create: `skill/vectorshell-operations/references/output-format.md`
-- Read: `docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md`
+- Read: `docs/specs/2026-03-28-vectorshell-operations-design.md`
 
 - [ ] **Step 1: Re-read the approved reporting requirements**
 
 Read the `Result reporting` section from:
 ```text
-docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md
+docs/specs/2026-03-28-vectorshell-operations-design.md
 ```
 
 Expected to confirm the hybrid output order:

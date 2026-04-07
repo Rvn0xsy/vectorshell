@@ -126,4 +126,4 @@ Use `message` as the primary user-facing error detail.
 4. Event ordering is best-effort; reconnect logic may miss transient events.
 5. Reconnection strategy: re-subscribe and replay from last known state.
 
-For conversation SSE schema, see: `api-docs/sse-event-schema.json`.
+For conversation SSE schema, see: `docs/api/sse-event-schema.json`.

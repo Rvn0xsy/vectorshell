@@ -93,7 +93,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - The frontend talks only to the server HTTP API; it does not connect directly to clients.
 
 ### API docs
-- `api-docs/README.md` and `api-docs/openapi.yaml` describe the REST/SSE surface. Refer to these when changing frontend/server API behavior.
+- `docs/api/README.md` and `docs/api/openapi.yaml` describe the REST/SSE surface. Refer to these when changing frontend/server API behavior.
 
 ### MCP Server
 The MCP server exposes VectorShell tools to MCP-compatible AI clients (e.g., Claude Desktop):
