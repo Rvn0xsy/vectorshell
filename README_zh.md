@@ -101,6 +101,29 @@ client_token = "your-client-token" # 嵌入客户端的 token
 enabled = true                     # 启用 /mcp MCP 服务端
 ```
 
+## Agent Preamble (SOUL.md)
+
+AI Agent 的行为由 `config/SOUL.md` 定义 — 一个在启动时加载的 markdown 前置文档。如不存在，则使用内置默认。
+
+```bash
+# 从示例创建
+cp config/SOUL.example.md config/SOUL.md
+# 编辑以自定义 agent 身份、工具和响应风格
+```
+
+SOUL.md 主要部分：
+
+| 部分 | 用途 |
+|------|------|
+| Identity | Agent 名称和角色 |
+| Mission | 核心目标和优先级 |
+| Tool Semantics | 各工具的描述 |
+| Policy | 行为规则和限制 |
+| Chinese Mapping | 中文命令到工具调用的映射 |
+| Response Style | 简洁/事实性回复指导 |
+
+该文件会被 gitignore — 每个部署可以有自己的定制 preamble，不影响代码库。
+
 ## MCP 服务端
 
 VectorShell 内置 MCP 服务端，向 MCP 兼容的 AI 客户端暴露所有工具。

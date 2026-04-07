@@ -101,6 +101,29 @@ client_token = "your-client-token" # Token embedded in clients
 enabled = true                     # Enable MCP server at /mcp
 ```
 
+## Agent Preamble (SOUL.md)
+
+The AI agent's behavior is defined by `config/SOUL.md` — a markdown preamble loaded at startup. If absent, a built-in default is used.
+
+```bash
+# Create from example
+cp config/SOUL.example.md config/SOUL.md
+# Edit to customize agent identity, tools, and response style
+```
+
+Key sections in SOUL.md:
+
+| Section | Purpose |
+|---------|---------|
+| Identity | Agent name and role |
+| Mission | Core objectives and priorities |
+| Tool Semantics | Description of each available tool |
+| Policy | Behavioral rules and restrictions |
+| Chinese Mapping | Maps Chinese commands to tool calls |
+| Response Style | Concise/factual guidance |
+
+The file is gitignored — each deployment can have its own customized preamble without affecting the repo.
+
 ## MCP Server
 
 VectorShell includes a built-in MCP server that exposes all tools to MCP-compatible AI clients.
