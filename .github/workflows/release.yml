@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── Build server (current platform, release) ───────────────────────────
+  build-server:
+    name: Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build server
+        run: cargo build -p vectorshell-server --release
+
+      - name: Copy binary
+        run: cp target/release/vectorshell-server vectorshell-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-binary
+          path: vectorshell-server
+
+  # ─── Build clients for all supported targets ─────────────────────────────
+  build-client:
+    name: Client (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: x86_64-pc-windows-gnu
+            runner: windows-latest
+            ext: .exe
+          - target: aarch64-pc-windows-gnu
+            runner: windows-latest
+            ext: .exe
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build client
+        env:
+          VECTOR_SERVER_URL: ws://127.0.0.1:8080/ws
+          VECTOR_AUTH_TOKEN: change-me
+          VECTOR_BUILD_UUID: github-actions
+          VECTOR_INSECURE_TLS: "false"
+          VECTOR_RECONNECT_INTERVAL: "5"
+          TARGET: ${{ matrix.target }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build -p vectorshell-client --release --target ${{ matrix.target }}
+          EXT="${{ matrix.ext }}"
+          [ "$EXT" = "" ] || [ "$EXT" = "null" ] && EXT=""
+          SRC="target/${{ matrix.target }}/release/vectorshell-client${EXT}"
+          DST="vectorshell-client-${{ matrix.target }}${EXT}"
+          cp "$SRC" "$DST"
+          echo "ASSET_NAME=$DST" >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-${{ matrix.target }}
+          path: ${{ steps.rename.outputs.ASSET_NAME }}
+
+  # ─── Build frontend ───────────────────────────────────────────────────────
+  build-frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm install --prefix dashboard
+
+      - name: Build frontend
+        run: npm run build --prefix dashboard
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dashboard/dist
+
+  # ─── Package & publish release ───────────────────────────────────────────
+  release:
+    name: Publish
+    needs: [build-server, build-client, build-frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # ── Server ──────────────────────────────────────────────────────────
+      - name: Prepare server binary
+        run: |
+          mkdir -p release
+          cp artifacts/server-binary/vectorshell-server release/
+          chmod +x release/vectorshell-server
+
+      # ── Client binaries ──────────────────────────────────────────────────
+      - name: Organize client binaries
+        run: |
+          mkdir -p release/clients
+          for dir in artifacts/client-*; do
+            cp "$dir"/* release/clients/
+          done
+          ls -la release/clients/
+
+      # ── Config files ─────────────────────────────────────────────────────
+      - name: Copy config files
+        run: |
+          cp config/config.example.toml release/
+          cp config/SOUL.example.md release/
+
+      # ── Frontend ─────────────────────────────────────────────────────────
+      - name: Copy frontend dist
+        run: |
+          cp -r artifacts/frontend-dist release/dashboard
+
+      # ── README ───────────────────────────────────────────────────────────
+      - name: Create README
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          cat > release/README.md << EOF
+          # VectorShell v${TAG_NAME}
+
+          Binary release. For source and documentation, see the main repository.
+
+          ## Contents
+
+          - \`vectorshell-server\` — Server binary (Linux x86_64)
+          - \`config.example.toml\` — Example server configuration
+          - \`SOUL.example.md\` — Example agent preamble
+          - \`clients/\` — Pre-built client binaries for all supported platforms
+          - \`dashboard/\` — Pre-built frontend (serve with any static file server)
+
+          ## Quick Start
+
+          1. Copy \`config.example.toml\` to \`config.toml\` and fill in your values.
+          2. Run the server: \`./vectorshell-server --config config.toml\`
+          3. Generate a client: \`./vectorshell-server --config config.toml generate-client\`
+          4. Copy the client binary to your target host and run it.
+
+          ## Frontend
+
+          Serve the \`dashboard/\` directory with any static file server, e.g.:
+            npx serve dashboard
+          Or point your browser to the server's \`/ui\` path if served by the server.
+          EOF
+
+      # ── Create archive ───────────────────────────────────────────────────
+      - name: Create archive
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tar -czvf vectorshell-${TAG_NAME}.tar.gz -C release .
+          ls -lh vectorshell-${TAG_NAME}.tar.gz
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vectorshell-${{ github.ref_name }}.tar.gz
+          generate_release_notes: true

@@ -26,7 +26,7 @@
 - `docs/superpowers/specs/2026-03-28-vectorshell-operations-design.md` — approved design spec
 - `server/src/api/mod.rs` — source of truth for current API behavior if wording needs verification during implementation
 - `server/src/client_manager/mod.rs` — source of truth for live session semantics if needed during implementation
-- `webapp/src/App.tsx` — useful current consumer example for conversation, session, tool, and artifact flows
+- `dashboard/src/App.tsx` — useful current consumer example for conversation, session, tool, and artifact flows
 
 ---
 
@@ -207,7 +207,7 @@ Expected: a commit containing the full main-skill behavior.
 - Create: `skill/vectorshell-operations/references/api-endpoints.md`
 - Read: `skill/vectorshell/references/api-endpoints.md`
 - Read: `server/src/api/mod.rs`
-- Read: `webapp/src/App.tsx`
+- Read: `dashboard/src/App.tsx`
 
 - [ ] **Step 1: Gather current endpoint semantics from code and old docs**
 
@@ -215,7 +215,7 @@ Read for verification:
 ```text
 skill/vectorshell/references/api-endpoints.md
 server/src/api/mod.rs
-webapp/src/App.tsx
+dashboard/src/App.tsx
 ```
 
 Verify or adjust these endpoint groups before writing:
@@ -305,14 +305,14 @@ Expected: a commit with the new endpoint reference.
 **Files:**
 - Create: `skill/vectorshell-operations/references/message-workflow.md`
 - Read: `skill/vectorshell/references/sse-events.md`
-- Read: `webapp/src/App.tsx`
+- Read: `dashboard/src/App.tsx`
 
 - [ ] **Step 1: Verify conversation and SSE flow from existing consumer behavior**
 
 Read:
 ```text
 skill/vectorshell/references/sse-events.md
-webapp/src/App.tsx
+dashboard/src/App.tsx
 ```
 
 Extract the current mental model:

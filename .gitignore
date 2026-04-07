@@ -11,6 +11,7 @@
 # Local/private configuration and secrets
 .env
 .env.*
+config.test.toml
 config/config.toml
 config/*.local.toml
 config/certs/*.pem

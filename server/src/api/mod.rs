@@ -50,7 +50,10 @@ pub async fn run_api_server(
     tls_config: Option<TlsSection>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_path = state.config.server.ws_path.clone();
-    let app = Router::new()
+    let ui_path = state.config.server.ui_path.clone().unwrap_or_else(|| "/ui".to_string());
+    let ui_dist = state.config.server.ui_dist.clone();
+
+    let mut app = Router::new()
         .route(ws_path.as_str(), get(websocket_upgrade))
         .route("/api/health", get(health))
         .route("/api/sessions", get(list_sessions))
@@ -76,9 +79,12 @@ pub async fn run_api_server(
         )
         .route("/api/clients/generate", post(generate_client))
         .route("/api/clients/download", get(download_generated_client))
-        .nest_service("/webapp", ServeDir::new("webapp/dist"))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state);
+
+    if let Some(dist) = ui_dist {
+        app = app.nest_service(ui_path.as_str(), ServeDir::new(dist));
+    }
 
     if let Some(tls) = tls_config {
         if tls.enabled {

@@ -6,6 +6,10 @@
 listen = "0.0.0.0:8080"
 # WebSocket endpoint path
 ws_path = "/ws"
+# URL path for the frontend dashboard (default: /ui)
+ui_path = "/ui"
+# Path to the built frontend dist directory (if not set, frontend is not served)
+ui_dist = "dashboard/dist"
 
 [tls]
 # Set true to enable TLS for both WebSocket (wss://) and HTTP API (https://)
@@ -32,7 +36,7 @@ reconnect_interval = 5
 insecure_tls = false
 
 [auth]
-# API token used by webapp/curl Authorization header
+# API token used by dashboard/curl Authorization header
 api_token = "change-me-strong-random-api-token"
 # Client token embedded into generated client for WS registration
 client_token = "change-me-strong-random-client-token"

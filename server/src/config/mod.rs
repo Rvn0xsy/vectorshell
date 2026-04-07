@@ -14,6 +14,8 @@ pub struct ServerConfig {
 pub struct ServerSection {
     pub listen: String,
     pub ws_path: String,
+    pub ui_path: Option<String>,
+    pub ui_dist: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

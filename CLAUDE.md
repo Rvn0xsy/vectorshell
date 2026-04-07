@@ -12,76 +12,79 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run all Rust tests: `cargo test`
 - Run tests for one crate: `cargo test -p shared`
 - Run a single Rust test: `cargo test -p shared register_message_roundtrip -- --exact`
-- Run the server with the default config: `cargo run -p vectorshell-server -- --config config/config.toml`
+- Run the server: `cargo run -p vectorshell-server -- --config config/config.toml`
 - Show server CLI help: `cargo run -p vectorshell-server -- --help`
-- Generate a client binary through the server entrypoint: `cargo run -p vectorshell-server -- --config config/config.toml generate-client --target linux-amd64`
+- Generate a client binary: `cargo run -p vectorshell-server -- --config config/config.toml generate-client`
+- Cross-compile a client for a specific target:
+  `cargo run -p vectorshell-server -- --config config/config.toml generate-client --target linux-amd64`
+  Supported aliases: `linux-amd64`, `linux-arm64`, `windows-amd64`, `windows-arm64`, `macos-amd64`, `macos-arm64` (or use raw triples like `x86_64-unknown-linux-gnu`).
 
 ### Web app
-- Install deps: `npm install --prefix webapp`
-- Start the Vite dev server: `npm run --prefix webapp dev`
-- Build the web app: `npm run --prefix webapp build`
-- Lint the web app: `npm run --prefix webapp lint`
-- Preview the production web build: `npm run --prefix webapp preview`
+- Install deps: `npm install --prefix dashboard`
+- Start the Vite dev server: `npm run --prefix dashboard dev`
+- Build the web app: `npm run --prefix dashboard build`
+- Lint the web app: `npm run --prefix dashboard lint`
+- Preview the production web build: `npm run --prefix dashboard preview`
 
 ## Configuration and runtime shape
-- Main server config lives in `config/config.toml`; examples/test variants are in `config/config.example.toml` and `config/config.test.toml`.
-- `server.src.config` deserializes five config areas: server listen/ws path, LLM agent settings, embedded client defaults, auth tokens, and optional TLS.
-- The server can serve both the API and the built frontend on the same port; production frontend assets are expected in `webapp/dist` and are mounted at `/webapp`.
-- Client binaries are parameterized at build time via compile-time env vars (`VECTOR_SERVER_URL`, `VECTOR_AUTH_TOKEN`, `VECTOR_BUILD_UUID`, `VECTOR_INSECURE_TLS`, `VECTOR_RECONNECT_INTERVAL`). The server’s `generate-client` path sets these before running `cargo build -p vectorshell-client --release`.
-- Agent identity/preamble is loaded from `config/SOUL.md` when present, otherwise the built-in default prompt is used.
+- Main server config: `config/config.toml`; examples: `config/config.example.toml`, `config/config.test.toml`.
+- `config/SOUL.md` is the agent preamble loaded when present (falls back to built-in default).
+- `server/src/config` deserializes: `[server]` (listen, ws_path, ui_path, ui_dist), `[agent]`, `[client]`, `[auth]`, `[tls]`.
+- The server can serve both the API and the built frontend on the same port; the frontend is mounted at `ui_path` (default `/ui`) from `ui_dist` (default `dashboard/dist`).
+- Client binaries are parameterized at build time via compile-time `env!` constants (`VECTOR_SERVER_URL`, `VECTOR_AUTH_TOKEN`, `VECTOR_BUILD_UUID`, `VECTOR_INSECURE_TLS`, `VECTOR_RECONNECT_INTERVAL`). The server’s `generate-client` path sets these before `cargo build -p vectorshell-client --release`.
+- Persistent SQLite database: `data/vectorshell.db` (created automatically).
+- Logs: `logs/vectorshell.log` (rolling daily, via `tracing-appender`).
 
 ## High-level architecture
 
 ### Workspace structure
-- `server/`: axum-based control plane and API.
-- `client/`: remote client that connects back over WebSocket and executes server-issued jobs/tools.
-- `shared/`: wire protocol types shared by server and client.
-- `webapp/`: React/Vite frontend for session browsing, chat, tool activity, and artifact flows.
+- `server/`: axum-based control plane, API, and LLM agent.
+- `client/`: remote client — reverse WebSocket connect, executes server-issued tools.
+- `shared/`: wire protocol types (`shared/src/protocol.rs`) shared by server and client.
+- `dashboard/`: React/Vite frontend.
 
 ### Server architecture
-- `server/src/main.rs` is the orchestration entrypoint. It loads config, constructs the `Agent`, `ClientManager`, SQLite `Db`, in-memory event bus, and UI state, then runs the API server and local REPL together.
-- `server/src/api/mod.rs` is the main HTTP/WebSocket boundary. It handles:
-  - client WebSocket registration and message handling
-  - authenticated REST endpoints for sessions, conversations, artifacts, and client generation
-  - SSE streams for per-session and per-conversation updates
-  - static serving of `webapp/dist`
-- `server/src/client_manager/mod.rs` is the in-memory live-session registry. It stores active connections, advertised client capabilities, pending tool/exec requests, and exec history.
-- `server/src/db/mod.rs` is the persistent history layer in SQLite (`data/vectorshell.db`). It stores session presence, command history, chat history, and conversation-to-install mappings.
-- `server/src/event_bus/mod.rs` is a per-key broadcast hub used to fan out SSE events. Session streams and conversation streams are keyed separately in-memory.
-- `server/src/builder/mod.rs` wraps client compilation/copying into `build/clients/`.
+- `server/src/main.rs`: entrypoint. Loads config, constructs `Agent`, `ClientManager`, SQLite `Db`, event bus, and UI state, then runs the API server and local REPL together.
+- `server/src/api/mod.rs`: HTTP/WebSocket boundary. Handles client WebSocket registration, authenticated REST endpoints (sessions, conversations, artifacts), SSE streams, and static asset serving.
+- `server/src/client_manager/mod.rs`: in-memory live-session registry. Stores active connections, capabilities, pending requests, and exec history.
+- `server/src/db/mod.rs`: SQLite persistent layer (`data/vectorshell.db`). Session presence, command/chat history, conversation-to-install mappings.
+- `server/src/event_bus/mod.rs`: per-key broadcast hub. SSE session streams and conversation streams are keyed separately in-memory.
+- `server/src/builder/mod.rs`: wraps client cross-compilation, embeds config, outputs to `build/clients/`.
+- `server/src/ui.rs`: REPL/internal UI state helpers.
+- Tool implementations: `server/src/agent/exec_tool.rs`, `server/src/agent/file_tools.rs`, `server/src/agent/windows_tools.rs`.
 
 ### Agent/tool flow
-- `server/src/agent/mod.rs` builds the LLM-facing agent and registers the available tools.
-- Tool implementations are split by concern:
-  - `server/src/agent/exec_tool.rs`
-  - `server/src/agent/file_tools.rs`
-  - `server/src/agent/windows_tools.rs`
-- The server agent does not execute locally on the server target host; tools are marshaled through `ClientManager` to the selected connected client, then results are returned to the agent loop.
-- The agent loop keeps a small in-memory list of prior tool outputs and has a repeated-call guard to stop the model from issuing the same tool call over and over.
+- The server agent runs **only on the server**; tools are marshaled through `ClientManager` to the selected connected client.
+- The agent loop maintains a small in-memory history list and a repeated-call guard.
+- Windows-only tools (PowerShell CLR, .NET assembly) are gated by client capability advertisement.
 
 ### Client architecture
-- `client/src/main.rs` is a thin wrapper around `websocket::run_client()`.
-- `client/src/websocket/mod.rs` owns reconnect behavior, WebSocket registration, heartbeats, and dispatch of server messages.
-- On connect, the client generates a fresh `connection_id`, reuses/persists an `install_id`, collects host metadata, advertises tool capabilities, and registers with the server.
-- `client/src/executor.rs` is the execution backend for server-issued work. It implements shell exec, file read/write/upload/download, chunked download, and Windows-only CLR/.NET helpers.
-- The server relies on the client’s advertised capability list before dispatching tools.
+- `client/src/main.rs`: thin wrapper around `websocket::run_client()`.
+- `client/src/websocket/mod.rs`: reconnect behavior, WebSocket registration, heartbeats, server message dispatch.
+- `client/src/executor.rs`: execution backend — shell exec, file read/write/upload/download, chunked download, Windows CLR/.NET helpers.
+- `client/src/embedded_config/mod.rs`: compile-time `env!` constants (server URL, auth token, reconnect interval, insecure TLS).
 
-### Shared protocol
-- `shared/src/protocol.rs` is the contract between server and client.
-- Messages are tagged enums:
-  - client → server: register, heartbeat, exec result, tool result
-  - server → client: exec, upload/download placeholders, ping, tool call
-- If you change any wire shape here, you almost certainly need coordinated server and client updates.
+### Session identity layers (critical)
+- `connection_id`: identifies a live WebSocket connection.
+- `session_id`: returned by server on registration, used for live routing.
+- `install_id`: persisted across reconnects; all persistent history (chat, command) is keyed by `install_id`.
+- The REPL `/use <install_id>` maps to `session_id` via `ClientManager::get_by_install_id`.
+
+### Auth tokens (two separate)
+- `api_token` (REST): Bearer token for HTTP API endpoints.
+- `client_token` (WebSocket): sent by client at registration time on the WebSocket connection.
+
+### Shared protocol (`shared/src/protocol.rs`)
+- Tagged enum messages over WebSocket JSON.
+- Client→Server: `Register`, `Heartbeat`, `Result`, `ToolResult`.
+- Server→Client: `Exec`, `Upload`, `Download`, `Ping`, `ToolCall`, `Registered`.
+- If you change wire shapes here, coordinated server+client updates are required.
 
 ### Frontend architecture
-- `webapp/src/App.tsx` is the main application and currently holds most UI state.
-- The frontend talks only to the server HTTP API; it does not connect directly to clients.
-- There are two SSE channels in the UI model:
-  - session stream: operational events like exec/tool results for the selected connection
-  - conversation stream: agent/tool lifecycle events for the active conversation
+- `dashboard/src/App.tsx`: main UI component, holds most state.
+- Two SSE channels: session stream (exec/tool results for selected connection) and conversation stream (agent/tool lifecycle events).
 - Session selection, conversation IDs, API base URL, and auth token are cached in browser local storage.
+- The frontend talks only to the server HTTP API; it does not connect directly to clients.
 
-## Important implementation relationships
-- Session identity has multiple layers: `client_id`/`connection_id` identify a live connection, while `install_id` ties history across reconnects. Persistent history and conversations are keyed by `install_id`; live routing is keyed by the active connection.
-- REST auth and client WebSocket auth are separate tokens from config.
-- The API docs under `api-docs/` describe the intended external REST/SSE surface and are useful when changing frontend/server API behavior.
+### API docs
+- `api-docs/README.md` and `api-docs/openapi.yaml` describe the REST/SSE surface. Refer to these when changing frontend/server API behavior.
