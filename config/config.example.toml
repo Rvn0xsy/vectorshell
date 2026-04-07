@@ -40,3 +40,7 @@ insecure_tls = false
 api_token = "change-me-strong-random-api-token"
 # Client token embedded into generated client for WS registration
 client_token = "change-me-strong-random-client-token"
+
+[mcp]
+# Set true to enable the MCP endpoint at /mcp
+enabled = false

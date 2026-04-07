@@ -5,6 +5,7 @@ mod client_manager;
 mod config;
 mod db;
 mod event_bus;
+mod mcp;
 mod ui;
 
 use crate::agent::Agent;
@@ -60,6 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let events = new_event_bus();
     let ui_state = Arc::new(Mutex::new(UiState::default()));
 
+    let mcp_state = config.mcp.as_ref().and_then(|mcp_cfg| {
+        if mcp_cfg.enabled {
+            Some(crate::mcp::McpState {
+                config: mcp_cfg.clone(),
+                sessions: Arc::new(crate::mcp::McpSessionStore::new()),
+                manager: Arc::clone(&manager),
+            })
+        } else {
+            None
+        }
+    });
+
     let api_state = ApiState {
         manager: Arc::clone(&manager),
         db: Arc::clone(&db),
@@ -69,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         client_auth_token: config.auth.client_token.clone(),
         events: events.clone(),
         ui_state: Arc::clone(&ui_state),
+        mcp_state,
     };
 
     let listen_addr = config.server.listen.clone();

@@ -5,6 +5,7 @@ use crate::client_manager::{ClientManager, ClientMetadata, ExecHistoryEntry};
 use crate::config::{ServerConfig, TlsSection};
 use crate::db::Db;
 use crate::event_bus::EventBus;
+use crate::mcp::{jsonrpc_error, jsonrpc_response};
 use crate::ui::{UiState, ui_print};
 use axum_server::tls_rustls::RustlsConfig;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -42,6 +43,7 @@ pub struct ApiState {
     pub client_auth_token: String,
     pub events: EventBus,
     pub ui_state: Arc<Mutex<UiState>>,
+    pub mcp_state: Option<crate::mcp::McpState>,
 }
 
 pub async fn run_api_server(
@@ -79,6 +81,7 @@ pub async fn run_api_server(
         )
         .route("/api/clients/generate", post(generate_client))
         .route("/api/clients/download", get(download_generated_client))
+        .route("/mcp", post(mcp_handle_jsonrpc).get(mcp_sse))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state);
 
@@ -1721,4 +1724,81 @@ fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+// ─── MCP HTTP+SSE handlers ──────────────────────────────────────────────────
+
+/// POST /mcp — JSON-RPC over HTTP.
+async fn mcp_handle_jsonrpc(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(req): Json<serde_json::Value>,
+) -> Response {
+    // MCP must be enabled
+    let Some(ref mcp_state) = state.mcp_state else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "mcp disabled" }))).into_response();
+    };
+
+    // Auth: reuse api_token
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if auth != format!("Bearer {}", state.api_auth_token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
+    }
+
+    // Parse JSON-RPC request
+    let rpc_req: crate::mcp::JsonRpcRequest = match serde_json::from_value(req) {
+        Ok(r) => r,
+        Err(e) => {
+            return Json(jsonrpc_error(json!(null), -32700, &format!("parse error: {}", e))).into_response();
+        }
+    };
+
+    // Handle the request
+    let response = match crate::mcp::handle_jsonrpc(mcp_state, rpc_req).await {
+        Ok(Some(result)) => {
+            jsonrpc_response(json!(null), result)
+        }
+        Ok(None) => {
+            // Notification — no response
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        Err(e) => {
+            jsonrpc_error(json!(null), -32003, &e)
+        }
+    };
+
+    Json(response).into_response()
+}
+
+/// GET /mcp — SSE stream for server-sent events.
+async fn mcp_sse(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Response {
+    // MCP must be enabled
+    let Some(ref _mcp_state) = state.mcp_state else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "mcp disabled" }))).into_response();
+    };
+
+    // Auth: reuse api_token
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if auth != format!("Bearer {}", state.api_auth_token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
+    }
+
+    // Return SSE stream with keepalive comments
+    use futures_util::stream::repeat_with;
+    use tokio_stream::StreamExt;
+    let stream = repeat_with(|| {
+        Ok::<_, std::convert::Infallible>(Event::default().comment("keepalive"))
+    })
+    .throttle(std::time::Duration::from_secs(15));
+
+    Sse::new(stream).into_response()
 }

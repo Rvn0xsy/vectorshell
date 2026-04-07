@@ -1,6 +1,10 @@
 use serde::Deserialize;
 use std::fs;
 
+fn default_mcp_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub server: ServerSection,
@@ -8,6 +12,8 @@ pub struct ServerConfig {
     pub client: ClientSection,
     pub auth: AuthSection,
     pub tls: Option<TlsSection>,
+    #[serde(default)]
+    pub mcp: Option<McpSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,6 +49,12 @@ pub struct ClientSection {
 pub struct AuthSection {
     pub api_token: String,
     pub client_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpSection {
+    #[serde(default = "default_mcp_enabled")]
+    pub enabled: bool,
 }
 
 impl ServerConfig {
