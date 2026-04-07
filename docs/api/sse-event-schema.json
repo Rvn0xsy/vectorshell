@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://vectorshell.local/api-docs/sse-event-schema.json",
+  "$id": "https://vectorshell.local/docs/api/sse-event-schema.json",
   "title": "VectorShell Conversation SSE Event",
   "description": "JSON payload schema for events sent over /api/conversations/{conversation_id}/events",
   "oneOf": [
@@ -43,7 +43,10 @@
           "type": "object",
           "properties": {
             "event": { "const": "agent.message" },
-            "role": { "type": "string", "enum": ["assistant", "system", "tool"] },
+            "role": {
+              "type": "string",
+              "enum": ["assistant", "system", "tool"]
+            },
             "content": { "type": "string" },
             "final": { "type": "boolean" }
           },

@@ -251,7 +251,7 @@ vectorshell/
 ├── shared/           # 服务端与客户端共用的协议类型
 ├── dashboard/        # React/Vite 前端
 ├── config/           # 配置文件
-└── api-docs/        # REST/SSE API 文档
+└── docs/             # 项目文档 (API, 开发, 计划, 设计)
 ```
 
 ## License

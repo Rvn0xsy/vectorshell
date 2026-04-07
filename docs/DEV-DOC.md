@@ -37,7 +37,8 @@ vectorshell/
 │       └── protocol.rs        # JSON messages
 ├── config
 │   └── config.toml            # server config
-└── DEV-DOC.md
+└── docs
+    └── DEV-DOC.md
 ```
 
 ## Build
