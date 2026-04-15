@@ -7,6 +7,7 @@ use crate::db::Db;
 use crate::event_bus::EventBus;
 use crate::mcp::{jsonrpc_error, jsonrpc_response};
 use crate::ui::{UiState, ui_print};
+use crate::tui::TuiEvent;
 use axum_server::tls_rustls::RustlsConfig;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
@@ -213,6 +214,12 @@ async fn handle_ws_socket(
                                 // Send Registered ack to client
                                 ClientManager::send_registered(&tx, &id, &session_id, &payload.install_id);
                             }
+                            // Notify TUI of session change
+                            if let Ok(guard) = state.ui_state.lock() {
+                                if let Some(tui_tx) = &guard.tui_tx {
+                                    let _ = tui_tx.send(TuiEvent::SessionsChanged);
+                                }
+                            }
                             active_session_id = Some(session_id);
                             if let (Some(session_id), Ok(mgr), Ok(db)) = (
                                 active_session_id.clone(),
@@ -385,6 +392,12 @@ async fn handle_ws_socket(
                 if let Ok(db) = state.db.lock() {
                     let _ = db.mark_offline(&session_id, unix_timestamp());
                 }
+            }
+        }
+        // Notify TUI of session change
+        if let Ok(guard) = state.ui_state.lock() {
+            if let Some(tui_tx) = &guard.tui_tx {
+                let _ = tui_tx.send(TuiEvent::SessionsChanged);
             }
         }
     }
