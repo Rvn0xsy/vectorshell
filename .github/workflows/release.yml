@@ -5,25 +5,25 @@ on:
     tags:
       - 'v*'
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # ─── Build server (current platform, release) ───────────────────────────
+  # ─── Build and test server ───────────────────────────────────────────────
   build-server:
     name: Server
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go tests
+        run: GOFLAGS=-mod=readonly go test ./...
 
       - name: Build server
-        run: cargo build -p vectorshell-server --release
-
-      - name: Copy binary
-        run: cp target/release/vectorshell-server vectorshell-server
+        run: GOFLAGS=-mod=readonly go build -o vectorshell-server ./cmd/server
 
       - uses: actions/upload-artifact@v4
         with:
@@ -32,55 +32,55 @@ jobs:
 
   # ─── Build clients for all supported targets ─────────────────────────────
   build-client:
-    name: Client (${{ matrix.target }})
+    name: Client (${{ matrix.asset_name }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - target: x86_64-pc-windows-gnu
-            runner: windows-latest
-            ext: .exe
-          - target: aarch64-pc-windows-gnu
-            runner: windows-latest
-            ext: .exe
-          - target: x86_64-apple-darwin
-            runner: macos-latest
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-    runs-on: ${{ matrix.runner }}
+          - goos: linux
+            goarch: amd64
+            asset_name: vectorshell-client-linux-amd64
+          - goos: linux
+            goarch: arm64
+            asset_name: vectorshell-client-linux-arm64
+          - goos: windows
+            goarch: amd64
+            asset_name: vectorshell-client-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            asset_name: vectorshell-client-windows-arm64.exe
+          - goos: darwin
+            goarch: amd64
+            asset_name: vectorshell-client-macos-amd64
+          - goos: darwin
+            goarch: arm64
+            asset_name: vectorshell-client-macos-arm64
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Build client
         env:
-          VECTOR_SERVER_URL: ws://127.0.0.1:8080/ws
-          VECTOR_AUTH_TOKEN: change-me
-          VECTOR_BUILD_UUID: github-actions
-          VECTOR_INSECURE_TLS: "false"
-          VECTOR_RECONNECT_INTERVAL: "5"
-          TARGET: ${{ matrix.target }}
-          EXT: ${{ matrix.ext }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ASSET_NAME: ${{ matrix.asset_name }}
         run: |
-          rustup target add ${{ matrix.target }}
-          cargo build -p vectorshell-client --release --target ${{ matrix.target }}
-          EXT="${{ matrix.ext }}"
-          [ "$EXT" = "" ] || [ "$EXT" = "null" ] && EXT=""
-          SRC="target/${{ matrix.target }}/release/vectorshell-client${EXT}"
-          DST="vectorshell-client-${{ matrix.target }}${EXT}"
-          cp "$SRC" "$DST"
-          echo "ASSET_NAME=$DST" >> $GITHUB_OUTPUT
+          CGO_ENABLED=0 GOFLAGS=-mod=readonly go build \
+            -trimpath \
+            -ldflags "-s -w -X github.com/arch/vectorshell-go/internal/embedded.ServerURL=ws://127.0.0.1:8080/ws -X github.com/arch/vectorshell-go/internal/embedded.ClientToken=change-me-client-token -X github.com/arch/vectorshell-go/internal/embedded.ReconnectInterval=5" \
+            -o "$ASSET_NAME" \
+            ./cmd/client
 
       - uses: actions/upload-artifact@v4
         with:
-          name: client-${{ matrix.target }}
-          path: ${{ steps.rename.outputs.ASSET_NAME }}
+          name: client-${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
 
   # ─── Build frontend ───────────────────────────────────────────────────────
   build-frontend:
@@ -97,7 +97,7 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
 
       - name: Install dependencies
-        run: npm install --prefix dashboard
+        run: npm ci --prefix dashboard
 
       - name: Build frontend
         run: npm run build --prefix dashboard
@@ -142,13 +142,14 @@ jobs:
       # ── Config files ─────────────────────────────────────────────────────
       - name: Copy config files
         run: |
-          cp config/config.example.toml release/
-          cp config/SOUL.example.md release/
+          cp config.example.toml release/
+          cp SOUL.md release/
 
       # ── Frontend ─────────────────────────────────────────────────────────
       - name: Copy frontend dist
         run: |
-          cp -r artifacts/frontend-dist release/dashboard
+          mkdir -p release/dashboard/dist
+          cp -r artifacts/frontend-dist/. release/dashboard/dist/
 
       # ── README ───────────────────────────────────────────────────────────
       - name: Create README
@@ -164,22 +165,22 @@ jobs:
 
           - \`vectorshell-server\` — Server binary (Linux x86_64)
           - \`config.example.toml\` — Example server configuration
-          - \`SOUL.example.md\` — Example agent preamble
+          - \`SOUL.md\` — Default agent instruction file
           - \`clients/\` — Pre-built client binaries for all supported platforms
-          - \`dashboard/\` — Pre-built frontend (serve with any static file server)
+          - \`dashboard/dist/\` — Pre-built frontend assets served at \`/ui\`
 
           ## Quick Start
 
           1. Copy \`config.example.toml\` to \`config.toml\` and fill in your values.
-          2. Run the server: \`./vectorshell-server --config config.toml\`
-          3. Generate a client: \`./vectorshell-server --config config.toml generate-client\`
-          4. Copy the client binary to your target host and run it.
+          2. Edit \`SOUL.md\` or point \`agent.soul_path\` to another file if needed.
+          3. Run the server: \`./vectorshell-server -config ./config.toml\`
+          4. Keep \`ui_dist = "dashboard/dist"\` if you want the server to serve the bundled frontend.
+          5. Copy the matching client binary from \`clients/\` to your target host and run it with \`-config ./config.toml\`.
 
           ## Frontend
 
-          Serve the \`dashboard/\` directory with any static file server, e.g.:
-            npx serve dashboard
-          Or point your browser to the server's \`/ui\` path if served by the server.
+          The included frontend assets are already arranged for the default server config.
+          Start the server and open the \`/ui\` path in your browser.
           EOF
 
       # ── Create archive ───────────────────────────────────────────────────

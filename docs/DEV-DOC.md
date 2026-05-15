@@ -70,7 +70,7 @@ Commands:
 
 ## Configuration
 
-`config/config.toml`
+`config.toml`
 
 ```
 [server]
@@ -81,6 +81,7 @@ ws_path = "/ws"
 model = "gpt-4o"
 base_url = "https://api.openai.com/v1"
 api_key = ""   # optional; falls back to OPENAI_API_KEY
+soul_path = "SOUL.md"
 
 [client]
 default_server = "wss://127.0.0.1:8080/ws"
@@ -92,46 +93,20 @@ api_token = "change-me-api-token"
 client_token = "change-me-client-token"
 ```
 
+The server loads agent instructions from `SOUL.md` through `agent.soul_path`.
+
 ## Client Generation
 
-Generate a client binary with embedded config:
+Build a client binary directly:
 
 ```
-./target/debug/vectorshell-server generate-client --config config/config.toml
-```
-
-This compiles the client with environment variables:
-- `VECTOR_SERVER_URL`
-- `VECTOR_AUTH_TOKEN` (from `auth.client_token`)
-- `VECTOR_RECONNECT_INTERVAL`
-- `VECTOR_INSECURE_TLS`
-
-Output binary is copied to:
-```
-build/clients/
+go build -o build/clients/vectorshell-client ./cmd/client
 ```
 
 ## Embedded Client Config
 
-Client reads compile‑time constants in `client/src/embedded_config`.
-Defaults are provided for local dev when env vars are not set.
-
-Important: `client.insecure_tls` from `config/config.toml` is injected during `generate-client` and embedded into the output binary.
-
-## TLS / WSS
-
-- Server supports TLS WebSocket (`wss://`) via `[tls]` section.
-- Client supports `wss://`.
-- For self-signed certs, use `client.insecure_tls = true` and regenerate client.
-
-## Windows System Proxy
-
-Windows generated client attempts system proxy discovery in this order:
-
-1. WinHTTP auto proxy (PAC/WPAD)
-2. Manual proxy from Internet Settings (`ProxyServer`)
-
-If proxy is found, client uses HTTP CONNECT before WS/WSS handshake.
+Client embedded overrides live in `internal/embedded`.
+They are injected at build time via `-ldflags` when needed.
 
 ## Protocol
 
@@ -156,11 +131,10 @@ Server → Client:
 
 ## AI Agent
 
-AI command generation uses `rig-core` with OpenAI provider.
+The Go server agent loads its instruction text from the file configured by `agent.soul_path`.
 
-- Supports `base_url` for OpenAI‑compatible APIs.
-- `api_key` can be configured in TOML or via `OPENAI_API_KEY` env.
-- Output is constrained to a **single shell command** (no extra text).
+- Supports `base_url` for OpenAI-compatible APIs.
+- `api_key` can be configured in TOML or via `OPENAI_API_KEY`.
 
 ## Logging
 

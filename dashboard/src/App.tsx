@@ -280,6 +280,10 @@ function App() {
     setChat([{ kind: 'system', ts: now(), text: `selected session ${installId}` }])
     connectSessionSse(installId)
     const history = await api(`/api/sessions/${installId}/history`)
+    const restoredConversationId = String(history.conversation_id || '')
+    if (restoredConversationId) {
+      setConversationId(restoredConversationId)
+    }
     const restoredChat: ChatItem[] = (history.messages || []).map((m: any) => {
       if (m.role === 'assistant') return { kind: 'assistant', ts: now(), text: m.content }
       if (m.role === 'user') return { kind: 'user', ts: now(), text: m.content }
@@ -290,7 +294,9 @@ function App() {
       return [...seed, ...restoredChat, ...prev.filter((x) => x.kind === 'system' && x.text.includes('selected session'))]
     })
 
-    await createConversationForSession(installId)
+    if (!restoredConversationId) {
+      await createConversationForSession(installId)
+    }
   }
 
   const sendChatMessage = async (text: string) => {

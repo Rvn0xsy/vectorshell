@@ -1,88 +1,78 @@
-.PHONY: build build-release build-server test up run clean help
+APP_NAME := vectorshell-server
+CLIENT_NAME := vectorshell-client
+IMAGE_NAME ?= vectorshell
+IMAGE_TAG ?= latest
+CONFIG ?= ./config.toml
+GO ?= go
+DOCKER ?= docker
+DASHBOARD_DIR ?= ./dashboard
 
-# Default target
+.PHONY: help build build-server build-client run up run-server run-client run-repl fmt tidy test clean web-install web-dev web-build web-preview web-lint docker-build docker-run
+
 help:
 	@echo "VectorShell Makefile"
 	@echo ""
 	@echo "Usage:"
-	@echo "  make build          Build release binaries (server + client) + frontend"
-	@echo "  make build-server   Build only the server (release)"
-	@echo "  make test           Run all Rust tests"
-	@echo "  make test-watch     Run tests in watch mode (requires cargo-watch)"
-	@echo "  make up             Run the server with default config"
-	@echo "  make clean          Clean build artifacts"
-	@echo "  make web-install    Install dashboard dependencies"
-	@echo "  make web-dev        Start dashboard Vite dev server"
+	@echo "  make build          Build server and client binaries"
+	@echo "  make build-server   Build the server binary"
+	@echo "  make build-client   Build the client binary"
+	@echo "  make run-server     Run the server with the selected config"
+	@echo "  make run-client     Run the client with the selected config"
+	@echo "  make run-repl       Run the local REPL"
+	@echo "  make test           Run Go tests"
 	@echo "  make web-build      Build dashboard for production"
-	@echo "  make lint           Lint the Rust workspace"
-	@echo "  make gen-client     Generate client binary with embedded config"
-	@echo "  make gen-client TARGET=linux-arm64  Generate for specific target"
+	@echo "  make docker-build   Build the Docker image"
 
-# Build commands
-build: web-build
-	cargo build --release
-
-build-release:
-	cargo build --release
+build: build-server build-client
 
 build-server:
-	cargo build -p vectorshell-server --release
+	$(GO) build -o ./build/$(APP_NAME) ./cmd/server
 
-gen-client:
-	cargo run -p vectorshell-server -- --config config/config.toml generate-client $(if $(TARGET),--target $(TARGET),)
+build-client:
+	$(GO) build -o ./build/$(CLIENT_NAME) ./cmd/client
 
-# Test commands
-test:
-	cargo test
+up: run-server
 
-test-server:
-	cargo test -p vectorshell-server
+run: run-server
 
-test-client:
-	cargo test -p vectorshell-client
+run-server:
+	$(GO) run ./cmd/server -config $(CONFIG)
 
-test-shared:
-	cargo test -p shared
+run-client:
+	$(GO) run ./cmd/client -config $(CONFIG)
 
-test-single:
-	$(error Usage: make test-single TEST=name, e.g. make test-single TEST=register_message_roundtrip)
-
-# Run commands
-up:
-	cargo run -p vectorshell-server -- --config config/config.toml
-
-run:
-	cargo run -p vectorshell-server -- --config config/config.toml $(ARGS)
-
-# Webapp commands
-web-install:
-	npm install --prefix dashboard
-
-web-dev:
-	npm run --prefix dashboard dev
-
-web-build: web-install
-	npm run --prefix dashboard build
-
-web-preview:
-	npm run --prefix dashboard preview
-
-web-lint:
-	npm run --prefix dashboard lint
-
-# Code quality
-lint:
-	cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
+run-repl:
+	$(GO) run ./cmd/repl -config $(CONFIG)
 
 fmt:
-	cargo fmt --all
+	$(GO) fmt ./...
 
-# Cleanup
+tidy:
+	$(GO) mod tidy
+
+test:
+	$(GO) test ./...
+
 clean:
-	cargo clean
-	rm -rf dashboard/dist
-	rm -rf dashboard/node_modules/.vite
+	rm -rf ./build
 
-# Dependencies
-check:
-	cargo check --all
+web-install:
+	npm install --prefix $(DASHBOARD_DIR)
+
+web-dev:
+	npm run --prefix $(DASHBOARD_DIR) dev
+
+web-build: web-install
+	npm run --prefix $(DASHBOARD_DIR) build
+
+web-preview:
+	npm run --prefix $(DASHBOARD_DIR) preview
+
+web-lint:
+	npm run --prefix $(DASHBOARD_DIR) lint
+
+docker-build:
+	$(DOCKER) build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+
+docker-run:
+	$(DOCKER) run --rm -it -p 8080:8080 -v $(PWD)/data:/app/data $(IMAGE_NAME):$(IMAGE_TAG)

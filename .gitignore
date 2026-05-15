@@ -4,6 +4,13 @@
 # Generated client artifacts
 /build/
 
+# Reference / examples
+/dev-go/
+
+# Dependencies
+dashboard/node_modules/
+vendor/
+
 # Runtime logs
 /logs/
 *.log
@@ -11,6 +18,7 @@
 # Local/private configuration and secrets
 .env
 .env.*
+config.toml
 config.test.toml
 config/config.toml
 config/*.local.toml

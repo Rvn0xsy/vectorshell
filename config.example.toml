@@ -1,0 +1,35 @@
+[server]
+listen = ":8080"
+ws_path = "/ws"
+ui_path = "/ui"
+ui_dist = "dashboard/dist"
+public_url = ""
+
+[agent]
+model = "gpt-4.1"
+base_url = "https://api.openai.com/v1"
+api_key = ""
+soul_path = "SOUL.md"
+
+[client]
+server_url = "ws://127.0.0.1:8080/ws"
+reconnect_interval = 5
+
+[auth]
+api_token = "change-me-api-token"
+client_token = "change-me-client-token"
+
+[skill]
+enabled = true
+dir = "skill"
+
+[store]
+db_path = "data/vectorshell-go.db"
+
+[tunnel]
+enabled = false
+pre_shared_key = "bypass_proxy_32byte_key!!_abc!!!"
+port = 7734
+host = ""
+proxy_host = ""
+proxy_port = 0
