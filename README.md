@@ -1,3 +1,5 @@
+[English](./README.md) | [中文](./README_zh.md)
+
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go" alt="Go version">
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
