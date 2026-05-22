@@ -6,33 +6,9 @@ on:
       - 'v*'
 
 jobs:
-  # ─── Build and test server ───────────────────────────────────────────────
+  # ─── Build server binaries ────────────────────────────────────────────
   build-server:
-    name: Server
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run Go tests
-        run: GOFLAGS=-mod=readonly go test ./...
-
-      - name: Build server
-        run: GOFLAGS=-mod=readonly go build -o vectorshell-server ./cmd/server
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-binary
-          path: vectorshell-server
-
-  # ─── Build clients for all supported targets ─────────────────────────────
-  build-client:
-    name: Client (${{ matrix.asset_name }})
+    name: Server (${{ matrix.asset_name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -40,22 +16,10 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            asset_name: vectorshell-client-linux-amd64
+            asset_name: vectorshell-server-linux-amd64
           - goos: linux
             goarch: arm64
-            asset_name: vectorshell-client-linux-arm64
-          - goos: windows
-            goarch: amd64
-            asset_name: vectorshell-client-windows-amd64.exe
-          - goos: windows
-            goarch: arm64
-            asset_name: vectorshell-client-windows-arm64.exe
-          - goos: darwin
-            goarch: amd64
-            asset_name: vectorshell-client-macos-amd64
-          - goos: darwin
-            goarch: arm64
-            asset_name: vectorshell-client-macos-arm64
+            asset_name: vectorshell-server-linux-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -65,24 +29,26 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build client
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build server
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          ASSET_NAME: ${{ matrix.asset_name }}
         run: |
-          CGO_ENABLED=0 GOFLAGS=-mod=readonly go build \
+          CGO_ENABLED=0 go build \
             -trimpath \
-            -ldflags "-s -w -X github.com/arch/vectorshell-go/internal/embedded.ServerURL=ws://127.0.0.1:8080/ws -X github.com/arch/vectorshell-go/internal/embedded.ClientToken=change-me-client-token -X github.com/arch/vectorshell-go/internal/embedded.ReconnectInterval=5" \
-            -o "$ASSET_NAME" \
-            ./cmd/client
+            -ldflags "-s -w" \
+            -o "${{ matrix.asset_name }}" \
+            ./cmd/server
 
       - uses: actions/upload-artifact@v4
         with:
-          name: client-${{ matrix.asset_name }}
+          name: server-${{ matrix.asset_name }}
           path: ${{ matrix.asset_name }}
 
-  # ─── Build frontend ───────────────────────────────────────────────────────
+  # ─── Build frontend ───────────────────────────────────────────────────
   build-frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -99,100 +65,103 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefix dashboard
 
-      - name: Build frontend
+      - name: Build
         run: npm run build --prefix dashboard
 
-      - name: Upload dist
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
           path: dashboard/dist
 
-  # ─── Package & publish release ───────────────────────────────────────────
+  # ─── Package & publish release ────────────────────────────────────────
   release:
     name: Publish
-    needs: [build-server, build-client, build-frontend]
+    needs: [build-server, build-frontend]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      # ── Server ──────────────────────────────────────────────────────────
-      - name: Prepare server binary
-        run: |
-          mkdir -p release
-          cp artifacts/server-binary/vectorshell-server release/
-          chmod +x release/vectorshell-server
-
-      # ── Client binaries ──────────────────────────────────────────────────
-      - name: Organize client binaries
-        run: |
-          mkdir -p release/clients
-          for dir in artifacts/client-*; do
-            cp "$dir"/* release/clients/
-          done
-          ls -la release/clients/
-
-      # ── Config files ─────────────────────────────────────────────────────
-      - name: Copy config files
-        run: |
-          cp config.example.toml release/
-          cp SOUL.md release/
-
-      # ── Frontend ─────────────────────────────────────────────────────────
-      - name: Copy frontend dist
-        run: |
-          mkdir -p release/dashboard/dist
-          cp -r artifacts/frontend-dist/. release/dashboard/dist/
-
-      # ── README ───────────────────────────────────────────────────────────
-      - name: Create README
+      # ── Assemble release directory ───────────────────────────────────
+      - name: Assemble release
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          cat > release/README.md << EOF
-          # VectorShell v${TAG_NAME}
+          mkdir -p release
 
-          Binary release. For source and documentation, see the main repository.
+          # Server binaries (per-platform)
+          for dir in artifacts/server-*; do
+            cp "$dir"/* release/
+          done
+          chmod +x release/vectorshell-server-*
+
+          # Client source code (for runtime go build via /api/clients/generate)
+          mkdir -p release/src
+          cp -r cmd          release/src/
+          cp -r internal     release/src/
+          cp    go.mod       release/src/
+          cp    go.sum       release/src/
+
+          # Runtime assets
+          cp    config.example.toml  release/
+          cp    SOUL.md              release/
+          cp -r skills               release/
+
+          # Pre-built dashboard
+          mkdir -p release/dashboard/dist
+          cp -r artifacts/frontend-dist/. release/dashboard/dist/
+
+          # Release README
+          cat > release/README.md << 'RELEOF'
+          # VectorShell ${TAG_NAME}
 
           ## Contents
 
-          - \`vectorshell-server\` — Server binary (Linux x86_64)
-          - \`config.example.toml\` — Example server configuration
-          - \`SOUL.md\` — Default agent instruction file
-          - \`clients/\` — Pre-built client binaries for all supported platforms
-          - \`dashboard/dist/\` — Pre-built frontend assets served at \`/ui\`
+          | Path | Description |
+          |------|-------------|
+          | `vectorshell-server-*` | Server binaries (linux/amd64, linux/arm64) |
+          | `src/` | Client Go source — used by `/api/clients/generate` at runtime |
+          | `config.example.toml` | Example configuration |
+          | `SOUL.md` | Default agent instruction file |
+          | `skills/` | Agent skill documents |
+          | `dashboard/dist/` | Pre-built frontend (served at `/ui`) |
 
           ## Quick Start
 
-          1. Copy \`config.example.toml\` to \`config.toml\` and fill in your values.
-          2. Edit \`SOUL.md\` or point \`agent.soul_path\` to another file if needed.
-          3. Run the server: \`./vectorshell-server -config ./config.toml\`
-          4. Keep \`ui_dist = "dashboard/dist"\` if you want the server to serve the bundled frontend.
-          5. Copy the matching client binary from \`clients/\` to your target host and run it with \`-config ./config.toml\`.
+          ```
+          # 1. Choose your server binary and make it executable
+          chmod +x vectorshell-server-linux-amd64
 
-          ## Frontend
+          # 2. Copy and edit config
+          cp config.example.toml config.toml
+          # Edit: set agent.api_key, auth.api_token, auth.client_token
 
-          The included frontend assets are already arranged for the default server config.
-          Start the server and open the \`/ui\` path in your browser.
-          EOF
+          # 3. Run
+          ./vectorshell-server-linux-amd64 -config ./config.toml
+          ```
 
-      # ── Create archive ───────────────────────────────────────────────────
+          The server uses `src/` to cross-compile client binaries on demand.
+          Keep `src/` alongside the server binary (same working directory).
+          RELEOF
+
+      # ── Create archive ────────────────────────────────────────────────
       - name: Create archive
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          tar -czvf vectorshell-${TAG_NAME}.tar.gz -C release .
-          ls -lh vectorshell-${TAG_NAME}.tar.gz
+          tar -czvf "vectorshell-${TAG_NAME}.tar.gz" -C release .
+          sha256sum "vectorshell-${TAG_NAME}.tar.gz" > "vectorshell-${TAG_NAME}.tar.gz.sha256"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: vectorshell-${{ github.ref_name }}.tar.gz
+          files: |
+            vectorshell-${{ github.ref_name }}.tar.gz
+            vectorshell-${{ github.ref_name }}.tar.gz.sha256
           generate_release_notes: true
