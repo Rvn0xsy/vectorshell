@@ -6,7 +6,7 @@
 
 ---
 
-VectorShell 是一个 Go 实现的远程操作平台，将反向 Shell 基础设施、AI Agent 编排和 DPI 绕过网络层整合为一个统一的系统。在受限代理后方的客户端通过加密分片隧道连接；操作员通过 REST API、SSE 事件流、MCP 兼容工具或 React 仪表盘进行控制。
+VectorShell 是一个基于 Go 的 AI Agent 远程操作平台，其核心创新在于将 AI 推理与 Agent 执行解耦：服务端专注 AI 能力，客户端承载 Agent 逻辑，通过加密分片隧道实现 DPI 绕过与反向 Shell 通信。系统高度集成网络层基础设施，支持操作员通过 REST API、SSE 事件流、MCP 工具或 React 仪表盘，对受限代理后方的目标进行统一管控。
 
 ## 系统架构
 
